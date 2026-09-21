@@ -3,12 +3,15 @@ import gc
 from fastapi import FastAPI, APIRouter, Depends, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from tqdm import tqdm
+from celery_app import celery_app 
 from helpers.config import Settings, get_settings
 from models import ChunkModel, ProjectModel
 from models import ResponseSignal
 from .schemas.nlp import PushRequest, SearchRequest
 from controllers import NLPController
 import logging
+from celery.result import AsyncResult
+from tasks.data_indexing import index_project_task
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -17,109 +20,45 @@ nlp_router = APIRouter(
     tags=["api_v1", "nlp"],
 )
 
+
 @nlp_router.post("/index/push/{project_id}")
 async def index_project(request: Request, project_id: int, push_request: PushRequest):
-
     project_model = await ProjectModel.create_instance(db_client=request.app.state.db_client)
-    
-    chunk_model = await ChunkModel.create_instance(
-        db_client=request.app.state.db_client
-    )
-
     project = await project_model.get_project_or_create_one(project_id=project_id)
 
     if not project:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
-            }
+            content={"signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value},
         )
 
-    nlp_controller = NLPController(
-        vectordb_client=request.app.state.vectordb_client,
-        generation_client=request.app.state.generation_client,
-        embedding_client=request.app.state.embedding_client,
-        template_parser=request.app.state.template_parser
-    )
+    result = index_project_task.delay(project_id=project.project_id, do_reset=push_request.do_reset)
 
-     # create collection if not exists
-    collection_name = nlp_controller.create_collection_name(project_id=project.project_id)
-
-    _ = await request.app.state.vectordb_client.create_collection(
-        collection_name=collection_name,
-        embedding_size=request.app.state.embedding_client.embedding_size,
-        do_reset=push_request.do_reset,
-    )
-    
-    # setup batching
-    total_chunks_count = await chunk_model.get_total_chunks_count(project_id=project.project_id)
-    pbar = tqdm(total=total_chunks_count, desc="Vector Indexing", position=0)
-    
-    
-    has_records = True
-    page_no = 1
-    page_size = 1000                # how many chunks we pull from DB at once
-    embedding_batch_size = 32      # how many we embed at once (memory control)
-    inserted_items_count = 0
-    idx = 0
-
-    try:
-        while has_records:
-            page_chunks = await chunk_model.get_project_chunks(project_id=project.project_id,
-                                                               page_no=page_no,
-                                                               page_size=page_size,)
-            if len(page_chunks):
-                page_no += 1
-            
-            if not page_chunks or len(page_chunks) == 0:
-                has_records = False
-                break
-
-            chunks_ids =  [ c.chunk_id for c in page_chunks ]
-            idx += len(page_chunks)
-            
-            is_inserted = await nlp_controller.index_into_vector_db(
-                project=project,
-                chunks=page_chunks,
-                do_reset=False,                    # never reset inside the loop
-                create_index_after=False,          # ← critical
-                chunks_ids=chunks_ids
-            )
-
-            if not is_inserted:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={
-                        "signal": ResponseSignal.INSERT_INTO_VECTORDB_ERROR.value
-                    }
-                )
-
-            pbar.update(len(page_chunks))
-            inserted_items_count += len(page_chunks)
-            
-            # Help the OS reclaim memory
-            del page_chunks, chunks_ids
-            gc.collect()
-        
-    finally:
-        pbar.close()
-        
-    # Create the HNSW index ONLY ONCE after everything is inserted
-    logger.info(f"Creating vector index for {collection_name} ...")
-    await request.app.state.vectordb_client.create_vector_index(
-        collection_name=collection_name,
-        force=True,                # rebuild if it already exists
-        m=24,
-        ef_construction=128,
-    )
-        
     return JSONResponse(
-        content={
-            "signal": ResponseSignal.INSERT_INTO_VECTORDB_SUCCESS.value,
-            "inserted_items_count": inserted_items_count
-        }
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"signal": "INDEXING_DISPATCHED", "task_id": result.id},
     )
+
+
+@nlp_router.get("/index/status/{task_id}")
+async def indexing_status(task_id: str):
+    result = AsyncResult(task_id, app=celery_app)
+
+    data = {
+        "task_id": task_id,
+        "status": result.status,
+    }
+
+    if result.status == "PROGRESS":
+        data["meta"] = result.info
+    elif result.status == "SUCCESS":
+        data["result"] = result.result
+    elif result.status == "FAILURE":
+        data["error"] = str(result.info)
+
+    return data
+
+
 
 
 @nlp_router.get("/index/info/{project_id}")
