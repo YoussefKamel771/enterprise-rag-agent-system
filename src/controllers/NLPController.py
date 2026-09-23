@@ -30,45 +30,48 @@ class NLPController(BaseController):
             json.dumps(collection_info, default=lambda x: x.__dict__)
         )
 
-    async def index_into_vector_db(self, project: Project, chunks: List[DataChunk],
+    async def index_into_vector_db(self, project: Project, 
+                                   chunks: List[DataChunk],
                                    chunks_ids: List[int], 
                                    do_reset: bool = False,
                                    create_index_after: bool = False,      # ← default False for bulk
                                     embedding_batch_size: int = 32,       # ← control memory
     ):
-        # step1: get collection name
         collection_name = self.create_collection_name(project_id=project.project_id)
-
-        # step2: manage items
-        texts = [ c.chunk_text for c in chunks ]
-        metadata = [ c.chunk_metadata for c in  chunks]
         
-        # Embed in smaller batches to avoid OOM
-        vectors = []
-        for i in range(0, len(texts), embedding_batch_size):
-            batch_texts = texts[i : i + embedding_batch_size]
+        _ = await self.vectordb_client.create_collection(
+                    collection_name=collection_name,
+                    embedding_size=self.embedding_client.embedding_size,
+                    do_reset=do_reset,
+                )
+
+        for i in range(0, len(chunks), embedding_batch_size):
+
+            batch_chunks = chunks[i:i + embedding_batch_size]
+
+            batch_texts = [c.chunk_text for c in batch_chunks]
+            batch_metadata = [c.chunk_metadata for c in batch_chunks]
+
+            batch_ids = chunks_ids[i:i + embedding_batch_size]
+
+            # GPU inference
             batch_vectors = self.embedding_client.embed_text(
                 text=batch_texts,
                 document_type=DocumentTypeEnums.DOCUMENT.value,
+                batch_size=embedding_batch_size,
             )
-            vectors.extend(batch_vectors)
 
-        # step3: create collection if not exists
-        _ = await self.vectordb_client.create_collection(
-            collection_name=collection_name,
-            embedding_size=self.embedding_client.embedding_size,
-            do_reset=do_reset,
-        )
+            # Immediately insert
+            await self.vectordb_client.insert_many(
+                collection_name=collection_name,
+                texts=batch_texts,
+                metadata=batch_metadata,
+                vectors=batch_vectors,
+                record_ids=batch_ids,
+                create_index_after=create_index_after,
+            )
 
-        # step4: insert into vector db
-        _ = await self.vectordb_client.insert_many(
-            collection_name=collection_name,
-            texts=texts,
-            metadata=metadata,
-            vectors=vectors,
-            record_ids=chunks_ids,
-            create_index_after=create_index_after,
-        )
+            del batch_vectors
 
         return True
 
