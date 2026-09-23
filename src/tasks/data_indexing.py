@@ -3,7 +3,7 @@ import logging
 import gc
 from celery import group, chord
 from celery.exceptions import SoftTimeLimitExceeded
-
+import time
 from celery_app import celery_app, get_setup_utils
 from models import ChunkModel, ProjectModel
 from models import ResponseSignal
@@ -18,6 +18,8 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
         vectordb_provider_factory,
         generation_client, embedding_client,
         vectordb_client, template_parser) = await get_setup_utils()
+    
+    start_time = time.perf_counter()
   
     try:
         project_model = await ProjectModel.create_instance(db_client=db_client)
@@ -81,22 +83,39 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
             # quietly letting pages 1..N-1 stay reachable via local scope.
             del page_chunks, chunks_ids
             gc.collect()
+            
+            elapsed_so_far = round(time.perf_counter() - start_time, 2)
  
             if total_chunks_count:
                 self.update_state(
                     state="PROGRESS",
-                    meta={"inserted": inserted_items_count, "total": total_chunks_count},
+                    meta={
+                        "inserted": inserted_items_count,
+                          "total": total_chunks_count,
+                          "progress": f"{round(inserted_items_count / total_chunks_count * 100, 2)}%",
+                          "elapsed_seconds": f"{elapsed_so_far}s"},
+                    
                 )
  
-        # Build the ANN (HNSW) index exactly once, after every chunk has
-        # been inserted - not after every batch. Rebuilding it on every
-        # insert means re-scanning/re-indexing the whole growing table
-        # over and over, which is both slow and memory-hungry.
-        await vectordb_client.create_vector_index(collection_name=collection_name, force=True)
+        # Time specific heavy operations separately if needed
+        index_build_start = time.perf_counter()
+        await vectordb_client.create_vector_index(
+            collection_name=collection_name, force=True
+        )
+        index_build_duration = round(time.perf_counter() - index_build_start, 2)
+
+        # 3. Calculate final total elapsed time
+        total_duration = round(time.perf_counter() - start_time, 2)
+
+        logger.info(
+            f"Indexing completed in {total_duration}s (Index creation: {index_build_duration}s)"
+        )
  
         return {
             "signal": ResponseSignal.INSERT_INTO_VECTORDB_SUCCESS.value,
             "inserted_items_count": inserted_items_count,
+            "execution_time_seconds": total_duration,
+            "index_build_time_seconds": index_build_duration,
         }
  
     finally:
@@ -106,7 +125,7 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
  
 @celery_app.task(bind=True, name="tasks.nlp_tasks.index_project_task", max_retries=2)
 def index_project_task(self, project_id: int, do_reset: bool = False,
-                        page_size: int = 300, embedding_batch_size: int = 32):
+                        page_size: int = 1000, embedding_batch_size: int = 64):
     """
     Runs the heavy vector-indexing job in a Celery worker instead of inside
     the request/response cycle, so:
