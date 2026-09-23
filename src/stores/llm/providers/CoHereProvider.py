@@ -65,7 +65,7 @@ class CoHereProvider(LLMInterface):
              
             return response.text
 
-    def embed_text(self, text: Union[str, List[str]], document_type: str = None):
+    def embed_text(self, text: Union[str, List[str]], document_type: str = None, batch_size: int = 64) -> list:
             if not self.client:
                 self.logger.error("Cohere client is not initialized.")
                 return None

@@ -7,7 +7,7 @@ from typing import List, Union
 from sentence_transformers import SentenceTransformer
 
 class SentenceTransformerProvider(LLMInterface):
-    def __init__(self, device: str = "cpu",
+    def __init__(self, device: str = "cuda",
                  default_input_max_characters: int = 1000,
                  default_generation_max_output_tokens: int = 1000,
                  defaul_generation_temperature: float = 0.1):
@@ -31,7 +31,7 @@ class SentenceTransformerProvider(LLMInterface):
 
     def set_embedding_model(self, model_id: str, embedding_size: int):
         self.embedding_model_id = model_id
-        self.model = SentenceTransformer(model_id, device=self.device)
+        self.model = SentenceTransformer(model_id, device=self.device, truncate_dim=embedding_size)
         self.full_dim = self.model.get_embedding_dimension()
 
         if embedding_size > self.full_dim:
@@ -49,7 +49,9 @@ class SentenceTransformerProvider(LLMInterface):
 
     
 
-    def embed_text(self, text: Union[str, List[str]], document_type: str = None) -> list:
+    def embed_text(self, text: Union[str, List[str]], 
+                   document_type: str = None,
+                   batch_size: int = 64) -> list:
         if not self.model:
             self.logger.error("Embedding model is not set.")
             return None
@@ -64,18 +66,16 @@ class SentenceTransformerProvider(LLMInterface):
                 text = f"query: {text}"
             else:
                 text = [f"query: {t}" for t in text]
-
+                
+        
         embeddings = self.model.encode(
             text,
-            normalize_embeddings=False,   # normalize after truncation
+            normalize_embeddings=True,   
             convert_to_numpy=True,
-            show_progress_bar=False
+            batch_size=batch_size,
+            show_progress_bar=False,
         )
 
-        # Truncate + re-normalize (MRL)
-        embeddings = embeddings[:, :self.embedding_size]
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        embeddings = embeddings / norms
 
         if isinstance(text, str):
             return embeddings[0].tolist()

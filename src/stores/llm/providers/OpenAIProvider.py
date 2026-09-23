@@ -73,7 +73,7 @@ class OpenAIProvider(LLMInterface):
         return response.choices[0].message.content
 
 
-    def embed_text(self, text: Union[str, List[str]], document_type: str = None):
+    def embed_text(self, text: Union[str, List[str]], document_type: str = None, batch_size: int = 64) -> list:
         if not self.client:
             self.logger.error("OpenAI client is not initialized.")
             return None
@@ -90,8 +90,19 @@ class OpenAIProvider(LLMInterface):
         if not response or not response.data or len(response.data) == 0 or not response.data[0].embedding:
             self.logger.error("No embedding data returned from OpenAI.")
             return None
+        
+        embeddings = [
+            rec.embedding
+            for rec in sorted(response.data, key=lambda x: x.index)
+        ]
 
-        return [rec.embedding for rec in response.data]
+        if self.embedding_size:
+            embeddings = [
+                embedding[:self.embedding_size]
+                for embedding in embeddings
+            ]
+
+        return embeddings
 
     def process_text(self, prompt: str):
         return prompt[:self.default_input_max_characters].strip().lower()
