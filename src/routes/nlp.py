@@ -32,7 +32,10 @@ async def index_project(request: Request, project_id: int, push_request: PushReq
             content={"signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value},
         )
 
-    result = index_project_task.delay(project_id=project.project_id, do_reset=push_request.do_reset)
+    result = index_project_task.delay(project_id=project.project_id,
+                                      do_reset=push_request.do_reset,
+                                      page_size=push_request.page_size,
+                                      embedding_batch_size=push_request.embedding_batch_size)
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
