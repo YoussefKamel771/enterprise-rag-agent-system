@@ -1,19 +1,23 @@
 import asyncio
 import logging
 import gc
+from typing import Set, Optional
 from celery import group, chord
 from celery.exceptions import SoftTimeLimitExceeded
 import time
 from celery_app import celery_app, get_setup_utils
 from models import ChunkModel, ProjectModel
 from models import ResponseSignal
-from controllers import NLPController
+from controllers import NLPController, DataController
+from tasks.utils import resolve_doc_ids
 
 logger = logging.getLogger("celery_task")
 
 
 async def _run_indexing(self, project_id: int, do_reset: bool,
-                         page_size: int, embedding_batch_size: int):
+                         page_size: int, embedding_batch_size: int,
+                         document_set: Optional[str] = None,
+                        document_set_kwargs: Optional[dict] = None):
     (db_engine, db_client, llm_provider_factory, 
         vectordb_provider_factory,
         generation_client, embedding_client,
@@ -43,8 +47,12 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
             embedding_size=embedding_client.embedding_size,
             do_reset=do_reset,
         )
+        
+        
+        doc_ids = resolve_doc_ids(document_set, document_set_kwargs)
  
-        total_chunks_count = await chunk_model.get_total_chunks_count(project_id=project.project_id)
+        total_chunks_count = await chunk_model.get_total_chunks_count(
+            project_id=project.project_id, asset_ids=doc_ids,)
  
         has_records = True
         page_no = 1
@@ -54,7 +62,7 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
             # Only ONE page of chunks (default 100 rows) is ever resident
             # in memory at a time - never the whole project.
             page_chunks = await chunk_model.get_project_chunks(
-                project_id=project.project_id, page_no=page_no, page_size=page_size,
+                project_id=project.project_id, page_no=page_no, page_size=page_size, asset_ids=doc_ids,
             )
  
             if not page_chunks:
@@ -125,7 +133,9 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
  
 @celery_app.task(bind=True, name="tasks.nlp_tasks.index_project_task", max_retries=2)
 def index_project_task(self, project_id: int, do_reset: bool = False,
-                        page_size: int = 1000, embedding_batch_size: int = 64):
+                        page_size: int = 1000, embedding_batch_size: int = 64,
+                        document_set: Optional[str] = None,
+                        document_set_kwargs: Optional[dict] = None):
     """
     Runs the heavy vector-indexing job in a Celery worker instead of inside
     the request/response cycle, so:
@@ -133,11 +143,11 @@ def index_project_task(self, project_id: int, do_reset: bool = False,
         out on a long HTTP request
       - the work happens in a process that gets recycled after the job
         (worker_max_tasks_per_child=1), so memory doesn't creep up across runs
-      - only one page of chunks is ever held in memory at once
+      - only one page of chunks is ever held in memory at once.
     """
     try:
         return asyncio.run(
-            _run_indexing(self, project_id, do_reset, page_size, embedding_batch_size)
+            _run_indexing(self, project_id, do_reset, page_size, embedding_batch_size, document_set, document_set_kwargs)
         )
     except Exception as exc:
         logger.exception("Indexing task failed for project_id=%s", project_id)
