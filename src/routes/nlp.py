@@ -35,7 +35,9 @@ async def index_project(request: Request, project_id: int, push_request: PushReq
     result = index_project_task.delay(project_id=project.project_id,
                                       do_reset=push_request.do_reset,
                                       page_size=push_request.page_size,
-                                      embedding_batch_size=push_request.embedding_batch_size)
+                                      embedding_batch_size=push_request.embedding_batch_size,
+                                      document_set = push_request.document_set,
+                                        document_set_kwargs=push_request.document_set_kwargs)
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
