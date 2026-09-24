@@ -156,7 +156,7 @@ class PGVectorProvider(VectorDBInterface):
         is_index_existed = await self.is_index_existed(collection_name=collection_name)
         
         # Fast path – already exists and we don't want to force
-        if not force and await self.is_index_existed(collection_name):
+        if not force and is_index_existed:
             return False
         
         async with self.db_client() as session:
@@ -177,11 +177,11 @@ class PGVectorProvider(VectorDBInterface):
                     f"on {collection_name} ({records_count:,} rows) "
                 )
                 
+                index_name = self.default_index_name(collection_name)
                 # Drop existing index if we are forcing a rebuild
                 if force:
                     await session.execute(sql_text(f"DROP INDEX IF EXISTS {index_name}"))
                 
-                index_name = self.default_index_name(collection_name)
                 create_idx_sql = sql_text(f"""
                             CREATE INDEX {index_name}
                             ON {collection_name}
@@ -241,7 +241,7 @@ class PGVectorProvider(VectorDBInterface):
 
     async def insert_many(self, collection_name: str, texts: list,
                          vectors: list, metadata: list = None,
-                         record_ids: list = None, batch_size: int = 50, create_index_after: bool = True):
+                         record_ids: list = None, batch_size: int = 64, create_index_after: bool = True):
         
         is_collection_exists = await self.is_collection_exists(collection_name=collection_name)
         if not is_collection_exists:
