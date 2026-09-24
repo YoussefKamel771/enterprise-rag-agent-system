@@ -3,7 +3,7 @@ from ..LLMEnums import OpenAIEnums
 from openai import OpenAI
 import logging
 from typing import List, Union
-
+import numpy as np
 class OpenAIProvider(LLMInterface):
     def __init__(self, api_key: str, api_url: str = None, 
                  default_input_max_characters: int = 1000, 
@@ -73,34 +73,62 @@ class OpenAIProvider(LLMInterface):
         return response.choices[0].message.content
 
 
-    def embed_text(self, text: Union[str, List[str]], document_type: str = None, batch_size: int = 64) -> list:
-        if not self.client:
-            self.logger.error("OpenAI client is not initialized.")
+    def embed_text(
+    self,
+    text: Union[str, List[str]],
+    document_type: str = None,
+    batch_size: int = 100,
+    ) -> list:
+
+        if not self.embedding_model_id or not self.embedding_size:
+            self.logger.error(
+                "Embedding model ID / size is not set."
+            )
             return None
 
-        if not self.embedding_model_id:
-            self.logger.error("Embedding model ID is not set.")
-            return None
+        if isinstance(text, str):
+            text = [text]
+            single_input = True
+        else:
+            single_input = False
 
         response = self.client.embeddings.create(
             model=self.embedding_model_id,
-            input=text
-        )   
+            input=text,
+        )
 
-        if not response or not response.data or len(response.data) == 0 or not response.data[0].embedding:
-            self.logger.error("No embedding data returned from OpenAI.")
-            return None
-        
-        embeddings = [
-            rec.embedding
-            for rec in sorted(response.data, key=lambda x: x.index)
+        # Keep API ordering explicit
+        raw_embeddings = [
+            item.embedding
+            for item in sorted(response.data, key=lambda x: x.index)
         ]
 
-        if self.embedding_size:
-            embeddings = [
-                embedding[:self.embedding_size]
-                for embedding in embeddings
-            ]
+        # 768 -> 256
+        embeddings = np.asarray(
+            raw_embeddings,
+            dtype=np.float32
+        )
+
+        embeddings = embeddings[:, :self.embedding_size]
+
+        # Normalize entire batch
+        norms = np.linalg.norm(
+            embeddings,
+            axis=1,
+            keepdims=True
+        )
+
+        # Avoid division by zero
+        embeddings = embeddings / np.clip(
+            norms,
+            a_min=1e-12,
+            a_max=None
+        )
+
+        embeddings = embeddings.tolist()
+
+        if single_input:
+            return embeddings[0]
 
         return embeddings
 
@@ -112,3 +140,14 @@ class OpenAIProvider(LLMInterface):
             "role": role,
             "content": prompt
         }
+        
+    def normalize_embedding(self, embedding: list) -> list:
+        embedding = np.asarray(embedding, dtype=np.float32)
+
+        norm = np.linalg.norm(embedding)
+        if norm == 0:
+            return embedding
+
+        return embedding / norm
+
+
