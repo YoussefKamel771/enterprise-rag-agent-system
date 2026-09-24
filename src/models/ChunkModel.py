@@ -5,6 +5,7 @@ from bson.objectid import ObjectId
 from pymongo import InsertOne
 from sqlalchemy.future import select
 from sqlalchemy import func, delete
+from typing import Optional, Iterable
 
 class ChunkModel(BaseDataModel):
 
@@ -51,17 +52,37 @@ class ChunkModel(BaseDataModel):
             await session.commit()
         return result.rowcount
 
-    async def get_project_chunks(self, project_id: int, page_no: int=1, page_size: int=50):
+    async def get_project_chunks(self, project_id: int, page_no: int=1, page_size: int=100,
+                                 asset_ids: Optional[Iterable[str]] = None):
+        """
+        asset_ids: optional restriction to a specific subset of doc/asset ids
+        (e.g. the "gold" documents). None (default) returns every chunk in
+        the project, preserving the old behaviour.
+        """
         async with self.db_client() as session:
-            stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id).offset((page_no - 1) * page_size).limit(page_size)
+            stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id)
+ 
+            if asset_ids is not None:
+                stmt = stmt.where(DataChunk.chunk_asset_id.in_(asset_ids))
+ 
+            stmt = stmt.offset((page_no - 1) * page_size).limit(page_size)
             result = await session.execute(stmt)
             records = result.scalars().all()
         return records
 
-    async def get_total_chunks_count(self, project_id: int):
+    async def get_total_chunks_count(self, project_id: int,
+                                     asset_ids: Optional[Iterable[str]] = None):
+        """
+        asset_ids: same optional subset restriction as get_project_chunks,
+        so progress totals line up with what's actually being indexed.
+        """
         total_count = 0
         async with self.db_client() as session:
             count_sql = select(func.count(DataChunk.chunk_id)).where(DataChunk.chunk_project_id == project_id)
+ 
+            if asset_ids is not None:
+                count_sql = count_sql.where(DataChunk.chunk_asset_id.in_(asset_ids))
+ 
             records_count = await session.execute(count_sql)
             total_count = records_count.scalar()
         
