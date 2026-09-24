@@ -7,10 +7,12 @@ from .ProjectController import ProjectController
 from fastapi import UploadFile
 from models import ResponseSignal
 from models.db_schemas import Asset
-from typing import List, Optional, Iterator, Dict
+from typing import List, Optional, Iterator, Dict, Set
 import pyarrow.parquet as pq
-import re
 import os
+from pathlib import Path
+import pandas as pd
+
 
 def clean_text(text: str) -> str:
     """
@@ -27,43 +29,8 @@ class DataController(BaseController):
     
     def __init__(self):
         super().__init__()
-        self.size_scale = 1048576 # convert MB to bytes
-
-
-    def validate_uploaded_file(self, file: UploadFile):
-
-        if file.content_type not in self.app_settings.FILE_ALLOWED_TYPES:
-            return False, ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value
-
-        if file.size > self.app_settings.FILE_MAX_SIZE * self.size_scale:
-            return False, ResponseSignal.FILE_SIZE_EXCEEDED.value
-
-        return True, ResponseSignal.FILE_VALIDATED_SUCCESS.value
-    
-    def generate_unique_file_path(self, orig_file_name: str, project_id: str):
-        cleaned_file_name = self.get_clean_file_name(orig_file_name)
-        project_path = ProjectController().get_project_path(project_id=project_id)
-        unique_suffix = self.generate_random_string()
-        new_file_path = os.path.join(
-                                    project_path, 
-                                    f"{unique_suffix}_{cleaned_file_name}")
-        
-        while os.path.exists(new_file_path):
-            unique_suffix = self.generate_random_string()
-            new_file_path = os.path.join(
-                                    project_path, 
-                                    f"{unique_suffix}_{cleaned_file_name}")
-        return new_file_path, f"{unique_suffix}_{cleaned_file_name}"
-    
-    def get_clean_file_name(self, orig_file_name: str):
-
-        # remove any special characters, except underscore and .
-        cleaned_file_name = re.sub(r'[^\w.]', '', orig_file_name.strip())
-
-        # replace spaces with underscore
-        cleaned_file_name = cleaned_file_name.replace(" ", "_")
-
-        return cleaned_file_name
+        self.questions_path = os.path.join("EnterpriseRAG-Bench", "data", "questions", "test.parquet")
+        self.documents_path = os.path.join("EnterpriseRAG-Bench", "data", "documents", "test.parquet")
     
     # ------------------------------------------------------------------
     # Bulk parquet ingestion (EnterpriseRAG-Bench and similar datasets)
@@ -109,3 +76,36 @@ class DataController(BaseController):
                 },
             )
     
+    # ------------------------------------------------------------------
+    # Gold-document helpers (EnterpriseRAG-Bench evaluation subsets)
+    # ------------------------------------------------------------------
+    
+    def load_gold_doc_ids(self) -> Set[str]:
+        """
+        Load all unique expected_doc_ids from a questions parquet file.
+        Returns a set of strings (dsid_...).
+        """
+        if not self.questions_path:
+            raise ValueError("questions_path is required to load gold doc ids")
+        if not Path(self.questions_path).exists():
+            raise FileNotFoundError(f"Questions file not found: {self.questions_path}")
+    
+        df = pd.read_parquet(self.questions_path, columns=["expected_doc_ids"])
+        gold: Set[str] = set()
+        for ids in df["expected_doc_ids"]:
+            if ids is None:
+                continue
+            # handle both list and numpy array
+            for doc_id in ids:
+                if doc_id:
+                    gold.add(str(doc_id))
+        return gold
+    
+    def filter_gold_asset_ids(self, asset_ids: Set[str]) -> Set[str]:
+        """
+        Intersect a set of asset ids with the gold document ids referenced
+        by the questions in questions_path. Raises the same errors as
+        load_gold_doc_ids if questions_path is missing/invalid.
+        """
+        gold_ids = self.load_gold_doc_ids(self.questions_path)
+        return asset_ids & gold_ids
