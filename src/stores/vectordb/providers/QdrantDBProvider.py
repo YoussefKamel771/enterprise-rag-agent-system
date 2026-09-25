@@ -6,11 +6,18 @@ import logging
 from typing import List
 
 class QdrantDBProvider(VectorDBInterface):
-    def __init__(self, db_path: str, distance_method: str):
+    DENSE_VECTOR_NAME = "dense"
+    SPARSE_VECTOR_NAME = "sparse"
+    
+    def __init__(self, db_path: str, distance_method: str,
+                 sparse_model_id: str = "Qdrant/bm25",
+                 default_vector_size: int = 786):
 
         self.db_path = db_path
         self.distance_method = None
         self.client = None
+        self.sparse_model_id = sparse_model_id
+        self.default_vector_size = default_vector_size
 
         if distance_method == DistanceMethodEnums.COSINE.value:
             self.distance_method = models.Distance.COSINE
@@ -59,10 +66,37 @@ class QdrantDBProvider(VectorDBInterface):
 
         await self.client.create_collection(
             collection_name=collection_name,
-            vectors_config=models.VectorParams(size=embedding_size, distance=self.distance_method)
+            vectors_config={
+                self.DENSE_VECTOR_NAME: models.VectorParams(
+                    size=embedding_size, distance=self.distance_method
+                )
+            },
+            sparse_vectors_config={
+                self.SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                    modifier=models.Modifier.IDF
+                )
+            },
         )
-        self.logger.info(f"Collection '{collection_name}' created with embedding size {embedding_size}.")
+        self.logger.info(
+            f"Collection '{collection_name}' created with dense size {embedding_size} "
+            f"and IDF-weighted sparse field '{self.SPARSE_VECTOR_NAME}'."
+        )
         return True
+    
+    def _build_point(self, id_, text: str, vector: list, metadata: dict = None):
+        return models.PointStruct(
+            id=id_,
+            vector={
+                self.DENSE_VECTOR_NAME: vector,
+                # FastEmbed tokenizes `text` locally and derives the sparse
+                # term-frequency vector; Qdrant applies the IDF weighting
+                # server-side at query time (see the sparse field's `modifier`).
+                self.SPARSE_VECTOR_NAME: models.Document(
+                    text=text, model=self.sparse_model_id
+                ),
+            },
+            payload={"text": text, "metadata": metadata if metadata else {}},
+        )
 
     async def insert_one(self, collection_name: str, text: str, vector: list,
                          metadata: dict = None, 
@@ -72,15 +106,9 @@ class QdrantDBProvider(VectorDBInterface):
             return False
 
         try:
-            await self.client.upload_records(
+            await self.client.upsert(
                 collection_name=collection_name,
-                records=[
-                    models.Record(
-                        id=[record_id],
-                        vector=vector,
-                        payload={"text": text, "metadata": metadata if metadata else {}}
-                    )
-                ]
+                points=[self._build_point(record_id, text, vector, metadata)],
             )
             self.logger.info(f"Inserted record with ID '{record_id}' into collection '{collection_name}'.")
             return True
@@ -109,21 +137,17 @@ class QdrantDBProvider(VectorDBInterface):
             batch_metadata = metadata[i:batch_end]
             batch_record_ids = record_ids[i:batch_end]
 
-            batch_records = [
-                models.Record(
-                    id=id,
-                    vector=vec,
-                    payload={"text": txt, "metadata": meta if meta else {}}
-                )
-                for txt, vec, meta, id in zip(batch_texts, batch_vectors, batch_metadata, batch_record_ids)
+            batch_points = [
+                self._build_point(id_, txt, vec, meta)
+                for txt, vec, meta, id_ in zip(batch_texts, batch_vectors, batch_metadata, batch_record_ids)
             ]
 
             try:
-                await self.client.upload_records(
+                await self.client.upsert(
                     collection_name=collection_name,
-                    records=batch_records
+                    records=batch_points
                 )
-                self.logger.info(f"Inserted batch of {len(batch_records)} records into collection '{collection_name}'.")
+                self.logger.info(f"Inserted batch of {len(batch_points)} records into collection '{collection_name}'.")
             except Exception as e:
                 self.logger.error(f"Failed to insert batch into collection '{collection_name}': {e}")
                 return False
@@ -131,18 +155,62 @@ class QdrantDBProvider(VectorDBInterface):
 
     async def search_by_vector(self, collection_name: str, vector: list, limit: int = 5):
 
-        search_results = await self.client.search(
+        results = await self.client.query_points(
             collection_name=collection_name,
             query_vector=vector,
+            using=self.DENSE_VECTOR_NAME,
             limit=limit
         )
-        if not search_results or len(search_results) == 0:
+        points = results.points
+        if not points or len(points) == 0:
             return None
         
         return [
             RetrievedDocument(**{
-                "score": result.score,
-                "text": result.payload["text"],
+                "score": point.score,
+                "text": point.payload["text"],
             })
-            for result in search_results
+            for point in points
+        ]
+        
+    async def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
+                            limit: int = 10):
+        """
+        Dense + BM25-style lexical search, fused server-side via RRF
+        (models.FusionQuery(fusion=models.Fusion.RRF)). `limit` sets how many
+        candidates each of the dense and sparse legs contributes before fusion —
+        pass a wide value here and narrow with a reranker afterward.
+        """
+        if not await self.is_collection_exists(collection_name):
+            self.logger.error(f"Can not hybrid-search a non-existed collection: {collection_name}")
+            return None
+
+        results = await self.client.query_points(
+            collection_name=collection_name,
+            prefetch=[
+                models.Prefetch(
+                    query=query_vector,
+                    using=self.DENSE_VECTOR_NAME,
+                    limit=limit,
+                ),
+                models.Prefetch(
+                    query=models.Document(text=query_text, model=self.sparse_model_id),
+                    using=self.SPARSE_VECTOR_NAME,
+                    limit=limit,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=limit,
+        )
+
+        points = results.points
+        if not points or len(points) == 0:
+            return None
+
+        return [
+            RetrievedDocument(**{
+                "score": point.score,
+                "text": point.payload["text"],
+            })
+            for point in points
         ]

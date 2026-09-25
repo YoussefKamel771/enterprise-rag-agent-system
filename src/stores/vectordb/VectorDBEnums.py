@@ -14,6 +14,7 @@ class PgVectorTableSchemeEnums(Enum):
     VECTOR = 'vector'
     CHUNK_ID = 'chunk_id'
     METADATA = 'metadata'
+    TEXT_SEARCH = 'text_search'   
     _PREFIX = 'pgvector'
 
 class PgVectorDistanceMethodEnums(Enum):

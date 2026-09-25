@@ -16,7 +16,9 @@ class VectorDBProviderFactory:
             
             return QdrantDBProvider(
                 db_path=qdrant_db_client ,
-                distance_method=self.config.VECTOR_DB_DISTANCE_METHOD
+                distance_method=self.config.VECTOR_DB_DISTANCE_METHOD,
+                sparse_model_id=self.config.SPARSE_MODEL_ID,
+                default_vector_size=self.config.EMBEDDING_MODEL_SIZE,
             )
 
         if provider == VectorDBEnums.PGVECTOR.value:
@@ -25,6 +27,8 @@ class VectorDBProviderFactory:
                 distance_method=self.config.VECTOR_DB_DISTANCE_METHOD,
                 default_vector_size=self.config.EMBEDDING_MODEL_SIZE,
                 index_threshold=self.config.VECTOR_DB_PGVEC_INDEX_THRESHOLD,
+                fts_language=self.config.VECTOR_DB_PGVEC_FTS_LANGUAGE,
+                rrf_k=self.config.VECTOR_DB_PGVEC_RRF_K,
             )
         
 

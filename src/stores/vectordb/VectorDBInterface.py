@@ -48,3 +48,8 @@ class VectorDBInterface(ABC):
     @abstractmethod
     def search_by_vector(self, collection_name: str, vector: list, limit: int) -> List[RetrievedDocument]:
         pass
+    
+    @abstractmethod
+    def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
+                    limit: int) -> List[RetrievedDocument]:
+        pass

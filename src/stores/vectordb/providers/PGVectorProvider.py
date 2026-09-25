@@ -5,12 +5,13 @@ import logging
 from typing import List
 from models.db_schemas import RetrievedDocument
 from sqlalchemy.sql import text as sql_text
-import json
+import json, re
 
 class PGVectorProvider(VectorDBInterface):
 
     def __init__(self, db_client, default_vector_size: int = 786,
-                       distance_method: str = None, index_threshold: int=100):
+                       distance_method: str = None, index_threshold: int=100,
+                       fts_language: str = "english", rrf_k: int = 60):
         
         self.db_client = db_client
         self.default_vector_size = default_vector_size
@@ -24,9 +25,14 @@ class PGVectorProvider(VectorDBInterface):
 
         self.pgvector_table_prefix = PgVectorTableSchemeEnums._PREFIX.value
         self.distance_method = distance_method
+        
+        # Lexical (full-text) search config — Postgres's own tsvector/ts_rank_cd
+        self.fts_language = fts_language
+        self.rrf_k = rrf_k
 
         self.logger = logging.getLogger("uvicorn")
         self.default_index_name = lambda collection_name: f"{collection_name}_vector_idx"
+        self.default_fts_index_name = lambda collection_name: f"{collection_name}_fts_idx"
 
     async def connect(self):
         async with self.db_client() as session:
@@ -126,15 +132,93 @@ class PGVectorProvider(VectorDBInterface):
                             f'{PgVectorTableSchemeEnums.VECTOR.value} vector({embedding_size}), '
                             f'{PgVectorTableSchemeEnums.METADATA.value} jsonb DEFAULT \'{{}}\', '
                             f'{PgVectorTableSchemeEnums.CHUNK_ID.value} integer, '
+                            f'{PgVectorTableSchemeEnums.TEXT_SEARCH.value} tsvector '
+                            f"GENERATED ALWAYS AS (to_tsvector('{self.fts_language}', "
+                            f'coalesce({PgVectorTableSchemeEnums.TEXT.value}, \'\'))) STORED, '
                             f'FOREIGN KEY ({PgVectorTableSchemeEnums.CHUNK_ID.value}) REFERENCES chunks(chunk_id)'
                         ')'
                     )
                     await session.execute(create_sql)
                     await session.commit()
             
+            await self.create_fts_index(collection_name=collection_name)
             return True
 
         return False
+    
+    # ------------------------------------------------------------------
+    # Full-text search (lexical) index
+    # ------------------------------------------------------------------
+
+    async def is_fts_index_existed(self, collection_name: str) -> bool:
+        index_name = self.default_fts_index_name(collection_name)
+        async with self.db_client() as session:
+            async with session.begin():
+                check_sql = sql_text(f"""
+                                    SELECT 1
+                                    FROM pg_indexes
+                                    WHERE tablename = :collection_name
+                                    AND indexname = :index_name
+                                    """)
+                results = await session.execute(check_sql, {"index_name": index_name, "collection_name": collection_name})
+
+                return bool(results.scalar_one_or_none())
+
+    async def create_fts_index(self, collection_name: str):
+        if await self.is_fts_index_existed(collection_name=collection_name):
+            return False
+
+        async with self.db_client() as session:
+            async with session.begin():
+                self.logger.info(f"Creating GIN full-text index on: {collection_name}")
+                index_name = self.default_fts_index_name(collection_name)
+                create_idx_sql = sql_text(
+                    f'CREATE INDEX {index_name} ON {collection_name} '
+                    f'USING GIN ({PgVectorTableSchemeEnums.TEXT_SEARCH.value})'
+                )
+                await session.execute(create_idx_sql)
+
+        return True
+
+    async def ensure_hybrid_columns(self, collection_name: str):
+        """
+        Migration helper: backfills the `text_search` generated column and its
+        GIN index onto a table that was created before hybrid search was added,
+        without touching existing rows or requiring re-embedding. Safe to call
+        on a table that already has both — it's a no-op then.
+        """
+        if not await self.is_collection_exists(collection_name=collection_name):
+            self.logger.warning(f"Collection {collection_name} does not exist; nothing to migrate.")
+            return False
+
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(sql_text(
+                    f'ALTER TABLE {collection_name} '
+                    f'ADD COLUMN IF NOT EXISTS {PgVectorTableSchemeEnums.TEXT_SEARCH.value} tsvector '
+                    f"GENERATED ALWAYS AS (to_tsvector('{self.fts_language}', "
+                    f'coalesce({PgVectorTableSchemeEnums.TEXT.value}, \'\'))) STORED'
+                ))
+
+        await self.create_fts_index(collection_name=collection_name)
+        self.logger.info(f"Hybrid search columns/index ensured on: {collection_name}")
+        return True
+    
+    def _build_or_tsquery(self, text: str) -> str:
+        """
+        Turn a natural-language query into an OR-of-terms tsquery string
+        (term1 | term2 | term3 | ...) instead of relying on plainto_tsquery's
+        default AND-everything semantics. AND-ing every lexeme in a full
+        question almost never matches a document chunk; OR lets partial term
+        overlap still surface a lexical hit, closer to how BM25-style
+        matching actually behaves. Stemming/stopword handling still happens
+        inside Postgres via to_tsquery's text search dictionary — we're only
+        changing the operator between terms, not reimplementing normalization.
+        """
+        words = re.findall(r"\w+", text.lower())
+        if not words:
+            return ""
+        return " | ".join(words)
 
     async def is_index_existed(self, collection_name: str) -> bool:
         index_name = self.default_index_name(collection_name)
@@ -288,31 +372,142 @@ class PGVectorProvider(VectorDBInterface):
             await self.create_vector_index(collection_name=collection_name)
 
         return True
-    
-    async def search_by_vector(self, collection_name: str, vector: list, limit: int):
+                
+    async def _search_dense(self, collection_name: str, query_vector: list, limit: int) -> List[dict]:
+        """
+        Pure dense (pgvector cosine) leg of hybrid search. Returns a list of
+        dicts — {chunk_id, text, score, rank} — ordered best-first, rank
+        starting at 1. Kept separate from search_by_vector because callers
+        of this leg (search_hybrid) need chunk_id and rank for fusion, not
+        just RetrievedDocument objects.
+        """
+        vector_str = "[" + ",".join([str(v) for v in query_vector]) + "]"
 
-        is_collection_exists = await self.is_collection_exists(collection_name=collection_name)
-        if not is_collection_exists:
-            self.logger.error(f"Can not search for records in a non-existed collection: {collection_name}")
-            return False
-        
-        vector = "[" + ",".join([ str(v) for v in vector ]) + "]"
         async with self.db_client() as session:
             async with session.begin():
-                search_sql = sql_text(f'SELECT {PgVectorTableSchemeEnums.TEXT.value} as text, 1 - ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector) as score'
-                                      f' FROM {collection_name}'
-                                      ' ORDER BY score DESC '
-                                      f'LIMIT {limit}'
-                                      )
-                
-                result = await session.execute(search_sql, {"vector": vector})
+                dense_sql = sql_text(
+                    f'SELECT {PgVectorTableSchemeEnums.CHUNK_ID.value} as chunk_id, '
+                    f'{PgVectorTableSchemeEnums.TEXT.value} as text, '
+                    f'1 - ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector) as score '
+                    f'FROM {collection_name} '
+                    f'ORDER BY score DESC LIMIT :limit'
+                )
+                result = await session.execute(dense_sql, {"vector": vector_str, "limit": limit})
+                rows = result.fetchall()
 
-                records = result.fetchall()
+        return [
+            {"chunk_id": row.chunk_id, "text": row.text, "score": row.score, "rank": rank}
+            for rank, row in enumerate(rows, start=1)
+        ]
 
-                return [
-                    RetrievedDocument(
-                        text=record.text,
-                        score=record.score
+    async def _search_lexical(self, collection_name: str, query_text: str, limit: int) -> List[dict]:
+        """
+        Pure lexical (Postgres full-text) leg of hybrid search, using an
+        OR-of-terms tsquery so partial term overlap still surfaces a match
+        (plainto_tsquery's default AND semantics rarely matches a full
+        question against a chunk). Returns a list of dicts —
+        {chunk_id, text, score, rank} — ordered best-first, rank starting at 1.
+        Returns [] (not an error) when the query has no usable terms or
+        nothing matches — callers should treat an empty lexical leg as a
+        signal worth logging, not silently ignoring.
+        """
+        
+        or_tsquery = self._build_or_tsquery(query_text)
+
+        async with self.db_client() as session:
+            async with session.begin():
+                if or_tsquery:
+                    lexical_sql = sql_text(
+                        f'SELECT {PgVectorTableSchemeEnums.CHUNK_ID.value} as chunk_id, '
+                        f'{PgVectorTableSchemeEnums.TEXT.value} as text, '
+                        f"ts_rank_cd({PgVectorTableSchemeEnums.TEXT_SEARCH.value}, "
+                        f"to_tsquery('{self.fts_language}', :query), 32) as score "  # 32 = normalize by document length
+                        f'FROM {collection_name} '
+                        f"WHERE {PgVectorTableSchemeEnums.TEXT_SEARCH.value} @@ "
+                        f"to_tsquery('{self.fts_language}', :query) "
+                        f'ORDER BY score DESC LIMIT :limit'
                     )
-                    for record in records
-                ]
+                    results = await session.execute(lexical_sql, {"query": or_tsquery, "limit": limit})
+                    rows = results.fetchall()
+                else:
+                    rows = []
+
+        return [
+            {"chunk_id": row.chunk_id, "text": row.text, "score": row.score, "rank": rank}
+            for rank, row in enumerate(rows, start=1)
+        ]
+        
+    def _rrf_fusion(self, dense_rows, lexical_rows, limit):
+        """RRF fusion: score(doc) = sum over legs of 1 / (k + rank_in_leg)"""
+        rrf_scores = {}
+        texts_by_chunk_id = {}
+
+        for row in dense_rows:
+            cid = row["chunk_id"]
+            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (self.rrf_k + row["rank"])
+            texts_by_chunk_id[cid] = row["text"]
+
+        for row in lexical_rows:
+            cid = row["chunk_id"]
+            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (self.rrf_k + row["rank"])
+            texts_by_chunk_id.setdefault(cid, row["text"])
+
+        fused = sorted(rrf_scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        
+        return [
+            RetrievedDocument(text=texts_by_chunk_id[chunk_id], score=score)
+            for chunk_id, score in fused
+        ]
+
+    async def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
+                            limit: int = 10, return_debug: bool = False):
+        """
+        Dense + lexical search, fused via Reciprocal Rank Fusion. 
+        
+        Returns a List[RetrievedDocument] by default. Pass return_debug=True
+        to instead get a dict:
+            {
+                "results": List[RetrievedDocument],   # fused, final
+                "dense": List[dict],                  # raw dense leg, for inspection
+                "lexical": List[dict],                # raw lexical leg, for inspection
+            }
+        """
+        is_collection_exists = await self.is_collection_exists(collection_name=collection_name)
+        if not is_collection_exists:
+            self.logger.error(f"Can not hybrid-search a non-existed collection: {collection_name}")
+            return None
+
+        dense_rows = await self._search_dense(collection_name=collection_name, query_vector=query_vector, limit=limit)
+        lexical_rows = await self._search_lexical(collection_name=collection_name, query_text=query_text, limit=limit)
+
+        if not dense_rows and not lexical_rows:
+            self.logger.error(f"No results from either leg for hybrid search on '{collection_name}'.")
+            return None
+
+        if not lexical_rows:
+            self.logger.warning(
+                f"Lexical leg returned 0 matches for hybrid search on '{collection_name}' "
+                f"(query: {query_text!r}) — result is effectively dense-only, wrapped in RRF."
+            )
+        if not dense_rows:
+            self.logger.warning(
+                f"Dense leg returned 0 matches for hybrid search on '{collection_name}' "
+                f"— result is effectively lexical-only, wrapped in RRF."
+            )
+
+        # RRF fusion
+        results = self._rrf_fusion(dense_rows, lexical_rows, limit)
+        
+        if not results:
+            self.logger.warning(
+                f"RRF Fusion returns nothing "
+            )
+
+        if return_debug:
+            return {
+                "results": results,
+                "dense": dense_rows,
+                "lexical": lexical_rows,
+            }
+
+        return results
