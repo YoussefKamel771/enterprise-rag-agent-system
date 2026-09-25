@@ -38,6 +38,7 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
             generation_client=generation_client,
             embedding_client=embedding_client,
             template_parser=None,  # not needed for indexing
+            reranker_client=None
         )
  
         collection_name = nlp_controller.create_collection_name(project_id=project.project_id)
