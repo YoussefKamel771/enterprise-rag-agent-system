@@ -93,6 +93,7 @@ async def process_data(request: Request, project_id: int, process_request: Proce
         generation_client=request.app.state.generation_client,
         embedding_client=request.app.state.embedding_client,
         template_parser=request.app.state.template_parser,
+        reranker_client=request.app.state.reranker_client,
     )
 
     project_files_ids = {}
