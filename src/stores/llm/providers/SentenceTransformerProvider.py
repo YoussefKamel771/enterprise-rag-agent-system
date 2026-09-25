@@ -78,7 +78,7 @@ class SentenceTransformerProvider(LLMInterface):
 
 
         if isinstance(text, str):
-            return embeddings[0].tolist()
+            return [embeddings.tolist()]
         return embeddings.tolist()
 
     def set_generation_model(self, model_id: str):
