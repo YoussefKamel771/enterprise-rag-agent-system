@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from routes import base, nlp
 from stores.llm import LLMProviderFactory
 from stores.vectordb import VectorDBProviderFactory
+from stores.reranker import RerankerProviderFactory
 from stores import TemplateParser
 from helpers.config import get_settings
 from contextlib import asynccontextmanager
@@ -29,19 +30,24 @@ async def lifespan(app: FastAPI):
 
     llm_provider_factory = LLMProviderFactory(settings)
     vector_db_provider_factory = VectorDBProviderFactory(settings, db_client=app.state.db_client)
+    reranker_provider_factory = RerankerProviderFactory(settings)
 
     # generation client
     app.state.generation_client = llm_provider_factory.create(settings.GENERATION_BACKEND)
     app.state.generation_client.set_generation_model(settings.GENERATION_MODEL_ID)
 
     # embedding client
-    # app.state.embedding_client = llm_provider_factory.create(settings.EMBEDDING_BACKEND)
-    # app.state.embedding_client.set_embedding_model(settings.EMBEDDING_MODEL_ID, 
-    #                                                settings.EMBEDDING_MODEL_SIZE)
+    app.state.embedding_client = llm_provider_factory.create(settings.EMBEDDING_BACKEND)
+    app.state.embedding_client.set_embedding_model(settings.EMBEDDING_MODEL_ID, 
+                                                   settings.EMBEDDING_MODEL_SIZE)
 
     # Vector DB client
     app.state.vectordb_client = vector_db_provider_factory.create(settings.VECTOR_DB_BACKEND)
     await app.state.vectordb_client.connect()    
+    
+    # Reranker client
+    app.state.reranker_client = reranker_provider_factory.create(settings.RERANKER_BACKEND)
+    app.state.reranker_client.set_reranker_model(settings.RERANKER_MODEL_ID)
 
     app.state.template_parser = TemplateParser(
         language=settings.PRIMARY_LANG,
