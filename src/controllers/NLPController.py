@@ -3,17 +3,20 @@ from models.db_schemas import Project, DataChunk
 from stores.llm.LLMEnums import DocumentTypeEnums
 from typing import List
 import json
+import logging
 
 class NLPController(BaseController):
 
     def __init__(self, vectordb_client, generation_client, 
-                 embedding_client,  template_parser):
+                 embedding_client, reranker_client, template_parser):
         super().__init__()
 
         self.vectordb_client = vectordb_client
         self.generation_client = generation_client
         self.embedding_client = embedding_client
+        self.reranker_client = reranker_client
         self.template_parser = template_parser
+        self.logger = logging.getLogger("uvicorn")
 
     def create_collection_name(self, project_id: str):
         return f"collection_{self.embedding_client.embedding_size}_{project_id}".strip()
@@ -76,7 +79,9 @@ class NLPController(BaseController):
         return True
 
 
-    async def search_vector_db_collection(self, project: Project, text: str, limit: int = 10):
+    async def search_vector_db_collection(self, project: Project, text: str, 
+                                          top_k: int = None, candidate_k: int = 40,
+                                          debug: bool = False):
         # step1: get collection name
         query_vector = None
         collection_name = self.create_collection_name(project_id=project.project_id)
@@ -85,7 +90,7 @@ class NLPController(BaseController):
         vectors = self.embedding_client.embed_text(text=text, 
                                                  document_type=DocumentTypeEnums.QUERY.value)
 
-        if not vectors or len(vectors) == 0:
+        if not vectors:
             return False
         
         if isinstance(vectors, list) and len(vectors) > 0:
@@ -94,19 +99,32 @@ class NLPController(BaseController):
         if not query_vector:
             return False
         
-        search_results = await self.vectordb_client.search_by_vector(
+        # step3: hybrid retrieval (dense + BM25 lexical, fused via RRF) 
+        search_results = await self.vectordb_client.search_hybrid(
             collection_name=collection_name,
-            vector=query_vector,
-            limit=limit
-        )
+            query_text=text,
+            query_vector=query_vector,
+            limit=candidate_k,
+            return_debug=debug
+        )      
 
+        self.logger.info(f"search_results: {search_results}")
         if not search_results or len(search_results) == 0:
             self.logger.error("No results found in the vector database for the given query.")
             return False
+        
+        if top_k:
+            # step4: rerank the fused candidates down to the requested limit
+            search_results = await self.reranker_client.rerank(
+                query=text,
+                documents=search_results,
+                top_n=top_k,
+            )
 
         return search_results
 
-    async def answer_rag_question(self, project: Project, query: str, limit: int = 10):
+    async def answer_rag_question(self, project: Project, query: str, 
+                                  top_k: int = None, candidate_k: int = 40):
 
         answer, full_prompt, chat_history = None, None, None
 
@@ -114,7 +132,8 @@ class NLPController(BaseController):
         retrieved_documents = await self.search_vector_db_collection(
             project=project,
             text=query,
-            limit=limit,
+            top_k=top_k,
+            candidate_k=candidate_k
         )
 
         if not retrieved_documents or len(retrieved_documents) == 0:
