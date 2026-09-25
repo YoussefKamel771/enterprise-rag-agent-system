@@ -10,5 +10,7 @@ class PushRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     text: str
-    limit: Optional[int] = 5
+    candidate_k: Optional[int] = None
+    top_k: Optional[int] = None
+    debug: Optional[bool] = False
     

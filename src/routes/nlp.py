@@ -76,7 +76,8 @@ async def get_project_index_info(request: Request, project_id: int):
         vectordb_client=request.app.state.vectordb_client,
         generation_client=request.app.state.generation_client,
         embedding_client=request.app.state.embedding_client,
-        template_parser=request.app.state.template_parser
+        template_parser=request.app.state.template_parser,
+        reranker_client=request.app.state.reranker_client,
     )
 
     collection_info = await nlp_controller.get_vector_db_collection_info(project=project)
@@ -103,20 +104,38 @@ async def search_index(request: Request, project_id: int, search_request: Search
         vectordb_client=request.app.state.vectordb_client,
         generation_client=request.app.state.generation_client,
         embedding_client=request.app.state.embedding_client,
-        template_parser=request.app.state.template_parser
+        template_parser=request.app.state.template_parser,
+        reranker_client=request.app.state.reranker_client,
     )
 
     results = await nlp_controller.search_vector_db_collection(
-        project=project, text=search_request.text, limit=search_request.limit
+        project=project,
+        text=search_request.text,
+        candidate_k=search_request.candidate_k,
+        top_k=search_request.top_k,
+        debug=search_request.debug
     )
 
     if not results:
         return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
-                    "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value
+                    "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value,
+                    "results": results
                 }
             )
+        
+    if search_request.debug:
+        return JSONResponse(
+            content={
+                "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
+                "results": [ r.dict() for r in results["results"] ],
+                "debug": {
+                    "dense": results["dense"],
+                    "lexical": results["lexical"],
+                }
+            }
+        )
     
     return JSONResponse(
         content={
@@ -139,13 +158,15 @@ async def answer_rag(request: Request, project_id: int, search_request: SearchRe
         vectordb_client=request.app.state.vectordb_client,
         generation_client=request.app.state.generation_client,  
         embedding_client=request.app.state.embedding_client,
-        template_parser=request.app.state.template_parser
+        template_parser=request.app.state.template_parser,
+        reranker_client=request.app.state.reranker_client,
     )
 
     answer, full_prompt, chat_history = await nlp_controller.answer_rag_question(
         project=project,
         query=search_request.text,
-        limit=search_request.limit,
+        candidate_k=search_request.candidate_k,
+        top_k=search_request.top_k,
     )
 
     if not answer:
