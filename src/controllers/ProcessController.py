@@ -46,6 +46,10 @@ class ProcessController(BaseController):
                 chunk_text=piece,
                 chunk_order=order + 1,
                 chunk_strategy=strategy,
+                chunk_metadata={
+                    "doc_id": asset.asset_id,
+                    "source_type":asset.asset_source_type
+                    },
                 chunk_char_count=len(piece),
                 chunk_token_count=token_length(piece),
                 chunk_project_id=asset.asset_project_id,
