@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
-from models import RetrievedDocument
+from models import RetrievedDocument, RetrievalResult
 
 class RerankerInterface(ABC):
 
@@ -9,6 +9,6 @@ class RerankerInterface(ABC):
         pass
 
     @abstractmethod
-    async def rerank(self, query: str, documents: List[RetrievedDocument],
-                      top_n: int = None) -> List[RetrievedDocument]:
+    async def rerank(self, query: str, results: RetrievalResult,
+                      top_n: int = None) -> RetrievalResult:
         pass

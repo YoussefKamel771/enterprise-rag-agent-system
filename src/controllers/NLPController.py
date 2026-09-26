@@ -58,7 +58,7 @@ class NLPController(BaseController):
             batch_ids = chunks_ids[i:i + embedding_batch_size]
 
             # GPU inference
-            batch_vectors = self.embedding_client.embed_text(
+            batch_vectors = await self.embedding_client.embed_text(
                 text=batch_texts,
                 document_type=DocumentTypeEnums.DOCUMENT.value,
                 batch_size=embedding_batch_size,
@@ -87,7 +87,7 @@ class NLPController(BaseController):
         collection_name = self.create_collection_name(project_id=project.project_id)
 
         # step2: get text embedding vector
-        vectors = self.embedding_client.embed_text(text=text, 
+        vectors = await self.embedding_client.embed_text(text=text, 
                                                  document_type=DocumentTypeEnums.QUERY.value)
 
         if not vectors:
@@ -108,8 +108,8 @@ class NLPController(BaseController):
             return_debug=debug
         )      
 
-        self.logger.info(f"search_results: {search_results}")
-        if not search_results or len(search_results) == 0:
+        # self.logger.info(f"search_results: {search_results}")
+        if not search_results:
             self.logger.error("No results found in the vector database for the given query.")
             return False
         
@@ -117,7 +117,7 @@ class NLPController(BaseController):
             # step4: rerank the fused candidates down to the requested limit
             search_results = await self.reranker_client.rerank(
                 query=text,
-                documents=search_results,
+                results=search_results,
                 top_n=top_k,
             )
 
