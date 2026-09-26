@@ -1,4 +1,4 @@
-from qdrant_client import models, QdrantClient
+from qdrant_client import models, AsyncQdrantClient 
 from ..VectorDBInterface import VectorDBInterface
 from ..VectorDBEnums import DistanceMethodEnums
 from models import RetrievedDocument
@@ -27,7 +27,7 @@ class QdrantDBProvider(VectorDBInterface):
         self.logger = logging.getLogger("uvicorn")
 
     async def connect(self):
-        self.client = QdrantClient(path=self.db_path)
+        self.client = AsyncQdrantClient(path=self.db_path)
         self.logger.info("Connected to Qdrant database.")
 
     async def disconnect(self):
@@ -174,7 +174,7 @@ class QdrantDBProvider(VectorDBInterface):
         ]
         
     async def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
-                            limit: int = 10):
+                            limit: int = 10, return_debug: bool = False):
         """
         Dense + BM25-style lexical search, fused server-side via RRF
         (models.FusionQuery(fusion=models.Fusion.RRF)). `limit` sets how many

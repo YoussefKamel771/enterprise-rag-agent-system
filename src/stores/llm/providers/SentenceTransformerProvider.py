@@ -5,6 +5,7 @@ import numpy as np
 import logging
 from typing import List, Union
 from sentence_transformers import SentenceTransformer
+import asyncio
 
 class SentenceTransformerProvider(LLMInterface):
     def __init__(self, device: str = "cuda",
@@ -48,8 +49,13 @@ class SentenceTransformerProvider(LLMInterface):
         )
 
     
-
-    def embed_text(self, text: Union[str, List[str]], 
+    async def embed_text(self, text: Union[str, List[str]], 
+                       document_type: str = None,
+                       batch_size: int = 64) -> list:
+        return await asyncio.to_thread(self._embed_text_sync, text, document_type, batch_size)
+        
+        
+    def _embed_text_sync(self, text: Union[str, List[str]], 
                    document_type: str = None,
                    batch_size: int = 64) -> list:
         if not self.model:

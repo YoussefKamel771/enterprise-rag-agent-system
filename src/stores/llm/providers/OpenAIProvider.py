@@ -4,6 +4,8 @@ from openai import OpenAI
 import logging
 from typing import List, Union
 import numpy as np
+import asyncio
+
 class OpenAIProvider(LLMInterface):
     def __init__(self, api_key: str, api_url: str = None, 
                  default_input_max_characters: int = 1000, 
@@ -36,8 +38,16 @@ class OpenAIProvider(LLMInterface):
     def set_embedding_model(self, model_id : str, embedding_size : int):
         self.embedding_model_id = model_id
         self.embedding_size = embedding_size
+        
+    async def generate_text(self, prompt, chat_history=None, max_output_tokens=None, temperature=None) -> str:
+        chat_history = list(chat_history) if chat_history else []
+        return await asyncio.to_thread(self._generate_text_sync,
+                                       prompt, 
+                                       chat_history,
+                                       max_output_tokens,
+                                       temperature)
 
-    def generate_text(self, prompt : str, chat_history : list = None,
+    def _generate_text_sync(self, prompt : str, chat_history : list = None,
                        max_output_tokens : int = None, temperature : float = None):
 
         if chat_history is None:
@@ -72,13 +82,15 @@ class OpenAIProvider(LLMInterface):
          
         return response.choices[0].message.content
 
+    async def embed_text(self, text, document_type=None, batch_size=100) -> list:
+        return await asyncio.to_thread(self._embed_text_sync, text, document_type, batch_size)
 
-    def embed_text(
-    self,
-    text: Union[str, List[str]],
-    document_type: str = None,
-    batch_size: int = 100,
-    ) -> list:
+    def _embed_text_sync(
+        self,
+        text: Union[str, List[str]],
+        document_type: str = None,
+        batch_size: int = 100,
+        ) -> list:
 
         if not self.embedding_model_id or not self.embedding_size:
             self.logger.error(
