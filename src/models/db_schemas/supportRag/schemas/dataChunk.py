@@ -5,6 +5,10 @@ from sqlalchemy.orm import relationship
 from sqlalchemy import Index
 from pydantic import BaseModel
 import uuid
+from datetime import datetime
+from typing import Optional, Any
+from pydantic import BaseModel, Field
+from dataclasses import dataclass
 
 class DataChunk(SQLAlchemyBase):
 
@@ -38,6 +42,24 @@ class DataChunk(SQLAlchemyBase):
     )
 
 class RetrievedDocument(BaseModel):
+    chunk_id: int
+    doc_id: str                              # = chunk_asset_id, the ground-truth doc identifier
     text: str
     score: float
+    rank: int
     
+    source_type: Optional[str] = None
+    parent_doc_id: Optional[str] = None      # for small-to-big / parent-document retrieval later
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    
+    
+@dataclass
+class RetrievalResult:
+    documents: list[RetrievedDocument]
+    dense_debug: Optional[list[dict]] = None
+    lexical_debug: Optional[list[dict]] = None
+    error: Optional[str] = None          # None == success
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None

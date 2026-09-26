@@ -124,15 +124,16 @@ async def search_index(request: Request, project_id: int, search_request: Search
                     "results": results
                 }
             )
-        
+    
+    # logger.info(f"results: {results}")
     if search_request.debug:
         return JSONResponse(
             content={
                 "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
-                "results": [ r.dict() for r in results["results"] ],
+                "results": [ r.dict() for r in results.documents ],
                 "debug": {
-                    "dense": results["dense"],
-                    "lexical": results["lexical"],
+                    "dense": results.dense_debug,
+                    "lexical": results.lexical_debug,
                 }
             }
         )
@@ -140,7 +141,7 @@ async def search_index(request: Request, project_id: int, search_request: Search
     return JSONResponse(
         content={
             "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
-            "results": [ result.dict()  for result in results ]
+            "results": [ result.dict()  for result in results.documents ]
         }
     )    
 

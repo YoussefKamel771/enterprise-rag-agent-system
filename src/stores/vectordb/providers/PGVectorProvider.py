@@ -1,9 +1,9 @@
-from ..VectorDBInterface import VectorDBInterface
+from ..VectorDBInterface import VectorDBInterface, MetadataFilter
 from ..VectorDBEnums import (DistanceMethodEnums, PgVectorTableSchemeEnums, 
                              PgVectorDistanceMethodEnums, PgVectorIndexTypeEnums)
 import logging
-from typing import List
-from models.db_schemas import RetrievedDocument
+from typing import List, Optional
+from models.db_schemas import RetrievedDocument, RetrievalResult
 from sqlalchemy.sql import text as sql_text
 import json, re
 
@@ -373,7 +373,7 @@ class PGVectorProvider(VectorDBInterface):
 
         return True
                 
-    async def _search_dense(self, collection_name: str, query_vector: list, limit: int) -> List[dict]:
+    async def search_by_vector(self, collection_name: str, query_vector: list, limit: int) -> List[dict]:
         """
         Pure dense (pgvector cosine) leg of hybrid search. Returns a list of
         dicts — {chunk_id, text, score, rank} — ordered best-first, rank
@@ -388,6 +388,7 @@ class PGVectorProvider(VectorDBInterface):
                 dense_sql = sql_text(
                     f'SELECT {PgVectorTableSchemeEnums.CHUNK_ID.value} as chunk_id, '
                     f'{PgVectorTableSchemeEnums.TEXT.value} as text, '
+                    f'{PgVectorTableSchemeEnums.METADATA.value} as metadata, '
                     f'1 - ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector) as score '
                     f'FROM {collection_name} '
                     f'ORDER BY score DESC LIMIT :limit'
@@ -396,11 +397,15 @@ class PGVectorProvider(VectorDBInterface):
                 rows = result.fetchall()
 
         return [
-            {"chunk_id": row.chunk_id, "text": row.text, "score": row.score, "rank": rank}
+            {"chunk_id": row.chunk_id, 
+             "text": row.text,
+             "metadata": row.metadata,
+             "score": row.score, 
+             "rank": rank}
             for rank, row in enumerate(rows, start=1)
         ]
 
-    async def _search_lexical(self, collection_name: str, query_text: str, limit: int) -> List[dict]:
+    async def search_lexical(self, collection_name: str, query_text: str, limit: int) -> List[dict]:
         """
         Pure lexical (Postgres full-text) leg of hybrid search, using an
         OR-of-terms tsquery so partial term overlap still surfaces a match
@@ -420,6 +425,7 @@ class PGVectorProvider(VectorDBInterface):
                     lexical_sql = sql_text(
                         f'SELECT {PgVectorTableSchemeEnums.CHUNK_ID.value} as chunk_id, '
                         f'{PgVectorTableSchemeEnums.TEXT.value} as text, '
+                        f'{PgVectorTableSchemeEnums.METADATA.value} as metadata, '
                         f"ts_rank_cd({PgVectorTableSchemeEnums.TEXT_SEARCH.value}, "
                         f"to_tsquery('{self.fts_language}', :query), 32) as score "  # 32 = normalize by document length
                         f'FROM {collection_name} '
@@ -433,30 +439,36 @@ class PGVectorProvider(VectorDBInterface):
                     rows = []
 
         return [
-            {"chunk_id": row.chunk_id, "text": row.text, "score": row.score, "rank": rank}
+            {"chunk_id": row.chunk_id, 
+            "text": row.text,
+            "metadata": row.metadata,
+            "score": row.score, 
+            "rank": rank}
             for rank, row in enumerate(rows, start=1)
         ]
         
     def _rrf_fusion(self, dense_rows, lexical_rows, limit):
         """RRF fusion: score(doc) = sum over legs of 1 / (k + rank_in_leg)"""
-        rrf_scores = {}
-        texts_by_chunk_id = {}
-
-        for row in dense_rows:
-            cid = row["chunk_id"]
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (self.rrf_k + row["rank"])
-            texts_by_chunk_id[cid] = row["text"]
-
-        for row in lexical_rows:
-            cid = row["chunk_id"]
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (self.rrf_k + row["rank"])
-            texts_by_chunk_id.setdefault(cid, row["text"])
+        rrf_scores, rows_by_chunk_id = {}, {}
+        for leg in (dense_rows, lexical_rows):
+            for row in leg:
+                cid = row["chunk_id"]
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (self.rrf_k + row["rank"])
+                rows_by_chunk_id.setdefault(cid, row)
 
         fused = sorted(rrf_scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
         
         return [
-            RetrievedDocument(text=texts_by_chunk_id[chunk_id], score=score)
-            for chunk_id, score in fused
+            RetrievedDocument(
+                chunk_id=cid,
+                doc_id=rows_by_chunk_id[cid]["metadata"].get("doc_id", str(cid)),
+                source_type=rows_by_chunk_id[cid]["metadata"].get("source_type", str(cid)),
+                text=rows_by_chunk_id[cid]["text"],
+                score=score,
+                rank=rank,
+                metadata=rows_by_chunk_id[cid]["metadata"],
+            )
+            for rank, (cid, score) in enumerate(fused, start=1)
         ]
 
     async def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
@@ -477,8 +489,8 @@ class PGVectorProvider(VectorDBInterface):
             self.logger.error(f"Can not hybrid-search a non-existed collection: {collection_name}")
             return None
 
-        dense_rows = await self._search_dense(collection_name=collection_name, query_vector=query_vector, limit=limit)
-        lexical_rows = await self._search_lexical(collection_name=collection_name, query_text=query_text, limit=limit)
+        dense_rows = await self.search_by_vector(collection_name=collection_name, query_vector=query_vector, limit=limit)
+        lexical_rows = await self.search_lexical(collection_name=collection_name, query_text=query_text, limit=limit)
 
         if not dense_rows and not lexical_rows:
             self.logger.error(f"No results from either leg for hybrid search on '{collection_name}'.")
@@ -504,10 +516,21 @@ class PGVectorProvider(VectorDBInterface):
             )
 
         if return_debug:
-            return {
-                "results": results,
-                "dense": dense_rows,
-                "lexical": lexical_rows,
-            }
-
-        return results
+            return RetrievalResult(documents=results,
+                            dense_debug=dense_rows,
+                            lexical_debug=lexical_rows)
+        
+        return RetrievalResult(documents=results)
+    
+    def _build_filter_clause(self, filters: Optional[MetadataFilter]):
+        if not filters:
+            return "", {}
+        clauses, params = [], {}
+        for k, v in filters.equals.items():
+            clauses.append(f"metadata->>{k!r} = :eq_{k}")
+            params[f"eq_{k}"] = str(v)
+        for k, vals in filters.in_.items():
+            clauses.append(f"metadata->>{k!r} = ANY(:in_{k})")
+            params[f"in_{k}"] = vals
+        where = f" AND {' AND '.join(clauses)}" if clauses else ""
+        return where, params

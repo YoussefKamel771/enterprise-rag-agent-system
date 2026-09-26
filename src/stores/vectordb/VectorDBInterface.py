@@ -1,6 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 from models import RetrievedDocument
+from dataclasses import dataclass, field
+@dataclass
+class MetadataFilter:
+    """Backend-agnostic filter spec — each provider translates this into its
+    native query language (SQL WHERE / jsonb ops for PGVector, models.Filter
+    for Qdrant)."""
+    equals: dict[str, Any] = field(default_factory=dict)
+    in_: dict[str, list[Any]] = field(default_factory=dict)
+    date_after: dict[str, str] = field(default_factory=dict)   # field -> ISO date
 
 class VectorDBInterface(ABC):
     @abstractmethod
@@ -51,5 +60,7 @@ class VectorDBInterface(ABC):
     
     @abstractmethod
     def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
-                    limit: int) -> List[RetrievedDocument]:
+                    limit: int, return_debug: bool,
+                    filters: Optional[MetadataFilter] = None,
+                    exclude_chunk_ids: Optional[list[int]] = None,) -> List[RetrievedDocument]:
         pass
