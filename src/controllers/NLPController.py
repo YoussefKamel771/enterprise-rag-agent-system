@@ -7,8 +7,8 @@ import logging
 
 class NLPController(BaseController):
 
-    def __init__(self, vectordb_client, generation_client, 
-                 embedding_client, reranker_client, template_parser):
+    def __init__(self, vectordb_client=None, generation_client=None, 
+                 embedding_client=None, reranker_client=None, template_parser=None):
         super().__init__()
 
         self.vectordb_client = vectordb_client

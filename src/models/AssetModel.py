@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional, Set
 import uuid
 from sqlalchemy.dialects.postgresql import insert
 from .BaseDataModel import BaseDataModel
@@ -58,23 +58,29 @@ class AssetModel(BaseDataModel):
 
         return assets
 
-    async def get_all_project_assets(self, asset_project_id: int, asset_type: str, batch_size: int = 2000):
+    async def get_all_project_assets(self, asset_project_id: int, asset_type: str,
+                                     asset_ids: Optional[Set[str]] = None,
+                                      batch_size: int = 2000):
         async with self.db_client() as session:
-            stmt = select(Asset).where(
+            filters = [
                 Asset.asset_project_id == asset_project_id,
-                Asset.asset_type == asset_type
-            ).execution_options(yield_per=batch_size)
+                Asset.asset_type == asset_type,
+            ]
+            if asset_ids is not None:
+                filters.append(Asset.asset_id.in_(asset_ids))
+                
+            stmt = select(Asset).where(*filters).execution_options(yield_per=batch_size)
 
             result = await session.stream(stmt)
             records = [row[0] async for row in result]
         return records
 
-    async def get_asset_record(self, asset_project_id: int, asset_name: str):
+    async def get_asset_record(self, asset_project_id: int, asset_id: str):
 
         async with self.db_client() as session:
             stmt = select(Asset).where(
                 Asset.asset_project_id == asset_project_id,
-                Asset.asset_name == asset_name
+                Asset.asset_id == asset_id
             )
             result = await session.execute(stmt)
             record = result.scalar_one_or_none()

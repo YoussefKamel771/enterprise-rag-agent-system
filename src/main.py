@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routes import base, nlp
+from routes import base, nlp, data
 from stores.llm import LLMProviderFactory
 from stores.vectordb import VectorDBProviderFactory
 from stores.reranker import RerankerProviderFactory
@@ -66,4 +66,5 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 app.include_router(base.base_router)
+app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)

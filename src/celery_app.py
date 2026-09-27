@@ -47,6 +47,7 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "tasks.data_indexing",
+        "tasks.data_processing",
     ]
 )
 
@@ -73,6 +74,12 @@ celery_app.conf.update(
     worker_cancel_long_running_tasks_on_connection_loss=True,
     timezone="UTC",
     enable_utc=True,
+    
+    task_routes={
+        "tasks.data_processing.process_assets": {"queue": "data_processing"},
+        "tasks.data_indexing.index_project_task": {"queue": "data_indexing"},
+        # "tasks.process_workflow.process_and_push_workflow": {"queue": "file_processing"},
+    }
 )
 
 celery_app.conf.task_default_queue = "default"
