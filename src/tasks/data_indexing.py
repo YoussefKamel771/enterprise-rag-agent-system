@@ -132,7 +132,7 @@ async def _run_indexing(self, project_id: int, do_reset: bool,
         await db_engine.dispose()
  
  
-@celery_app.task(bind=True, name="tasks.nlp_tasks.index_project_task", max_retries=2)
+@celery_app.task(bind=True, name="tasks.data_indexing.index_project_task", max_retries=2)
 def index_project_task(self, project_id: int, do_reset: bool = False,
                         page_size: int = 1000, embedding_batch_size: int = 64,
                         document_set: Optional[str] = None,
