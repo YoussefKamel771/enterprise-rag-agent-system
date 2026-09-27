@@ -1,9 +1,13 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Optional, Dict, Any
 
 class ProcessRequest(BaseModel):
-    file_id: str = None
-    chunk_size: Optional[int] = 100
-    chunk_overlap: Optional[int] = 20
-    do_reset: Optional[int] = 0
+    strategy: str = "recursive"
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    batch_size: int = 500
+    delete_existing: bool = False
+    skip_chunked: bool = False
+    document_set: Optional[str] = None
+    document_set_kwargs: Optional[Dict[str, Any]] = None
      
