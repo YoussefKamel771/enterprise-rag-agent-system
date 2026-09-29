@@ -4,12 +4,16 @@ from models import RetrievedDocument
 from dataclasses import dataclass, field
 @dataclass
 class MetadataFilter:
-    """Backend-agnostic filter spec — each provider translates this into its
-    native query language (SQL WHERE / jsonb ops for PGVector, models.Filter
-    for Qdrant)."""
-    equals: dict[str, Any] = field(default_factory=dict)
-    in_: dict[str, list[Any]] = field(default_factory=dict)
-    date_after: dict[str, str] = field(default_factory=dict)   # field -> ISO date
+    """Backend-agnostic filter. Each provider translates it to its native query.
+    `date_after` / `created_*` style ranges use gte/lte (ISO-8601 strings compare correctly)."""
+    equals: Dict[str, Any] = field(default_factory=dict)         # field == value
+    in_: Dict[str, List[Any]] = field(default_factory=dict)      # field IN (values)
+    gte: Dict[str, Any] = field(default_factory=dict)            # field >= value
+    lte: Dict[str, Any] = field(default_factory=dict)            # field <= value
+    
+    def is_empty(self) -> bool:
+        return not (self.equals or self.in_ or self.gte or self.lte)
+
 
 class VectorDBInterface(ABC):
     @abstractmethod

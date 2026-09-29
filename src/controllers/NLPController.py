@@ -1,7 +1,8 @@
 from .BaseController import BaseController
 from models.db_schemas import Project, DataChunk
+from stores.vectordb.VectorDBInterface import MetadataFilter
 from stores.llm.LLMEnums import DocumentTypeEnums
-from typing import List
+from typing import List, Optional
 import json
 import logging
 
@@ -81,7 +82,10 @@ class NLPController(BaseController):
 
     async def search_vector_db_collection(self, project: Project, text: str, 
                                           top_k: int = None, candidate_k: int = 40,
-                                          debug: bool = False):
+                                          debug: bool = False,
+                                          filters: Optional[MetadataFilter] = None,
+                                          exclude_chunk_ids: Optional[List[int]] = None):
+        
         # step1: get collection name
         query_vector = None
         collection_name = self.create_collection_name(project_id=project.project_id)
@@ -99,12 +103,15 @@ class NLPController(BaseController):
         if not query_vector:
             return False
         
+        candidate_k = candidate_k or 20
         # step3: hybrid retrieval (dense + BM25 lexical, fused via RRF) 
         search_results = await self.vectordb_client.search_hybrid(
             collection_name=collection_name,
             query_text=text,
             query_vector=query_vector,
             limit=candidate_k,
+            filters=filters,
+            exclude_chunk_ids=exclude_chunk_ids,
             return_debug=debug
         )      
 

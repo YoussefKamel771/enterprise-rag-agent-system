@@ -1,13 +1,14 @@
 from qdrant_client import models, AsyncQdrantClient 
-from ..VectorDBInterface import VectorDBInterface
+from ..VectorDBInterface import VectorDBInterface, MetadataFilter
 from ..VectorDBEnums import DistanceMethodEnums
 from models import RetrievedDocument
 import logging
-from typing import List
+from typing import List, Optional
 
 class QdrantDBProvider(VectorDBInterface):
     DENSE_VECTOR_NAME = "dense"
     SPARSE_VECTOR_NAME = "sparse"
+    _TOP_LEVEL_FIELDS = {"source_type", "doc_id", "chunk_id"}
     
     def __init__(self, db_path: str, distance_method: str,
                  sparse_model_id: str = "Qdrant/bm25",
@@ -84,18 +85,22 @@ class QdrantDBProvider(VectorDBInterface):
         return True
     
     def _build_point(self, id_, text: str, vector: list, metadata: dict = None):
+        metadata = metadata or {}
+        source_type = metadata.get("source_type")
         return models.PointStruct(
             id=id_,
             vector={
                 self.DENSE_VECTOR_NAME: vector,
-                # FastEmbed tokenizes `text` locally and derives the sparse
-                # term-frequency vector; Qdrant applies the IDF weighting
-                # server-side at query time (see the sparse field's `modifier`).
-                self.SPARSE_VECTOR_NAME: models.Document(
-                    text=text, model=self.sparse_model_id
-                ),
+                self.SPARSE_VECTOR_NAME: models.Document(text=text, model=self.sparse_model_id),
             },
-            payload={"text": text, "metadata": metadata if metadata else {}},
+            payload={
+                "text": text,
+                "metadata": metadata,
+                "chunk_id": id_,
+                "doc_id": metadata.get("doc_id"),
+                # lower-cased at write AND at filter time so "Slack" == "slack"
+                "source_type": source_type.lower() if isinstance(source_type, str) else source_type,
+            },
         )
 
     async def insert_one(self, collection_name: str, text: str, vector: list,
@@ -173,44 +178,82 @@ class QdrantDBProvider(VectorDBInterface):
             for point in points
         ]
         
+    def _payload_key(self, key: str) -> str:
+        return key if key in self._TOP_LEVEL_FIELDS else f"metadata.{key}"
+
+    @staticmethod
+    def _norm(key: str, value):
+        return value.lower() if key == "source_type" and isinstance(value, str) else value
+
+    def _build_qdrant_filter(self, filters: Optional[MetadataFilter],
+                             exclude_chunk_ids: Optional[List[int]]) -> Optional[models.Filter]:
+        must, must_not = [], []
+
+        if filters:
+            for key, value in filters.equals.items():
+                must.append(models.FieldCondition(
+                    key=self._payload_key(key), match=models.MatchValue(value=self._norm(key, value))))
+            for key, values in filters.in_.items():
+                if values:
+                    must.append(models.FieldCondition(
+                        key=self._payload_key(key),
+                        match=models.MatchAny(any=[self._norm(key, v) for v in values])))
+            for key in set(filters.gte) | set(filters.lte):       # merge gte+lte per key
+                lo, hi = filters.gte.get(key), filters.lte.get(key)
+                sample = lo if lo is not None else hi
+                rng = (models.DatetimeRange(gte=lo, lte=hi) if isinstance(sample, str)
+                       else models.Range(gte=lo, lte=hi))
+                must.append(models.FieldCondition(key=self._payload_key(key), range=rng))
+
+        if exclude_chunk_ids:
+            # point ids ARE chunk ids (NLPController passes record_ids=chunk ids)
+            must_not.append(models.HasIdCondition(has_id=[int(x) for x in exclude_chunk_ids]))
+
+        if not must and not must_not:
+            return None
+        return models.Filter(must=must or None, must_not=must_not or None)
+        
     async def search_hybrid(self, collection_name: str, query_text: str, query_vector: list,
-                            limit: int = 10, return_debug: bool = False):
-        """
-        Dense + BM25-style lexical search, fused server-side via RRF
-        (models.FusionQuery(fusion=models.Fusion.RRF)). `limit` sets how many
-        candidates each of the dense and sparse legs contributes before fusion —
-        pass a wide value here and narrow with a reranker afterward.
-        """
+                            limit: int = 10, offset: int = 0,
+                            filters: Optional[MetadataFilter] = None,
+                            exclude_chunk_ids: Optional[List[int]] = None,
+                            return_debug: bool = False):
         if not await self.is_collection_exists(collection_name):
             self.logger.error(f"Can not hybrid-search a non-existed collection: {collection_name}")
             return None
 
+        qfilter = self._build_qdrant_filter(filters, exclude_chunk_ids)
+        fetch = limit + offset          # each leg must reach past the offset for paging to work
+
         results = await self.client.query_points(
             collection_name=collection_name,
             prefetch=[
-                models.Prefetch(
-                    query=query_vector,
-                    using=self.DENSE_VECTOR_NAME,
-                    limit=limit,
-                ),
-                models.Prefetch(
-                    query=models.Document(text=query_text, model=self.sparse_model_id),
-                    using=self.SPARSE_VECTOR_NAME,
-                    limit=limit,
-                ),
+                # the filter must be repeated inside EACH prefetch -- a top-level
+                # query_filter does not propagate into prefetch stages
+                models.Prefetch(query=query_vector, using=self.DENSE_VECTOR_NAME,
+                                filter=qfilter, limit=fetch),
+                models.Prefetch(query=models.Document(text=query_text, model=self.sparse_model_id),
+                                using=self.SPARSE_VECTOR_NAME, filter=qfilter, limit=fetch),
             ],
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=limit,
+            offset=offset,
         )
 
         points = results.points
-        if not points or len(points) == 0:
+        if not points:
             return None
 
-        return [
-            RetrievedDocument(**{
-                "score": point.score,
-                "text": point.payload["text"],
-            })
-            for point in points
+        docs = [
+            RetrievedDocument(
+                chunk_id=int(p.id),
+                doc_id=p.payload.get("doc_id") or str(p.id),
+                source_type=p.payload.get("source_type"),
+                text=p.payload["text"],
+                score=p.score,
+                metadata=p.payload.get("metadata") or {},
+            )
+            for p in points
         ]
+        # Qdrant fuses server-side, so per-leg rows aren't available for debug output
+        return {"results": docs, "dense": [], "lexical": []} if return_debug else docs
