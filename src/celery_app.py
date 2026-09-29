@@ -48,6 +48,7 @@ celery_app = Celery(
     include=[
         "tasks.data_indexing",
         "tasks.data_processing",
+        "tasks.process_workflow",
     ]
 )
 
@@ -78,7 +79,7 @@ celery_app.conf.update(
     task_routes={
         "tasks.data_processing.process_assets": {"queue": "data_processing"},
         "tasks.data_indexing.index_project_task": {"queue": "data_indexing"},
-        # "tasks.process_workflow.process_and_push_workflow": {"queue": "file_processing"},
+        "tasks.process_workflow.check_chunking_result": {"queue": "data_processing"},
     }
 )
 
