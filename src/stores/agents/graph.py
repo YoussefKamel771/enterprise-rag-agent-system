@@ -34,12 +34,10 @@ from .nodes import (
     route_after_verifier,
     build_finalize_node,
 )
-from .tracing import traced
+from .tracing import TracedStateGraph, AgentLogCallbackHandler, agent_logger
 
 logger = logging.getLogger("uvicorn")
 
-def _node(graph, name, fn):
-    graph.add_node(name, traced(name)(fn))
 
 
 def _build_classifier_llm(settings):
@@ -56,35 +54,36 @@ def _build_classifier_llm(settings):
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_API_URL or None,
             temperature=0,
+            callbacks=[AgentLogCallbackHandler()],
         )
     raise ValueError(f"Unsupported AGENT_CLASSIFIER_BACKEND: {settings.AGENT_CLASSIFIER_BACKEND}")
 
 
 def _build_phase1(*, classifier_llm, nlp_controller, generation_llm, template_parser, get_project):
-    graph = StateGraph(RAGState)
-    _node(graph, "supervisor", build_supervisor_node(classifier_llm, allowed_destinations=["direct_retriever"],))
-    _node(graph,"direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
-    _node(graph,"generator", build_generator_node(generation_llm, template_parser))
-
+    graph = TracedStateGraph(RAGState)
+    graph.add_node("supervisor", build_supervisor_node(classifier_llm))
+    graph.add_node("direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
+    graph.add_node("generator", build_generator_node(generation_llm, template_parser))
+ 
     graph.add_edge(START, "supervisor")
     graph.add_edge("direct_retriever", "generator")
     graph.add_edge("generator", END)
-    return graph.compile()
+    return graph.compile(checkpointer=MemorySaver())
 
 
 def _build_phase2(*, classifier_llm, decomposer_llm, filter_llm, expansion_llm,
                    nlp_controller, generation_llm, template_parser, get_project,
                    completeness_max_docs, completeness_max_attempts):
     graph = StateGraph(RAGState)
-    _node(graph,"supervisor", build_supervisor_node(classifier_llm))
-    _node(graph,"direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
-    _node(graph,"decomposer", build_decomposer_node(decomposer_llm))
-    _node(graph,"retrieve_subquery", build_retrieve_subquery_node(nlp_controller, get_project))
-    _node(graph,"constraint_filter", build_constraint_filter_node(filter_llm, nlp_controller, get_project))
-    _node(graph,"conflict_resolver", build_conflict_resolver_node(nlp_controller, get_project))
-    _node(graph,"completeness_sweep", build_completeness_sweep_node(nlp_controller, get_project))
-    _node(graph,"broad_synthesis", build_broad_synthesis_node(expansion_llm))
-    _node(graph,"generator", build_generator_node(generation_llm, template_parser))
+    graph.add_edge(graph,"supervisor", build_supervisor_node(classifier_llm))
+    graph.add_edge(graph,"direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
+    graph.add_edge(graph,"decomposer", build_decomposer_node(decomposer_llm))
+    graph.add_edge(graph,"retrieve_subquery", build_retrieve_subquery_node(nlp_controller, get_project))
+    graph.add_edge(graph,"constraint_filter", build_constraint_filter_node(filter_llm, nlp_controller, get_project))
+    graph.add_edge(graph,"conflict_resolver", build_conflict_resolver_node(nlp_controller, get_project))
+    graph.add_edge(graph,"completeness_sweep", build_completeness_sweep_node(nlp_controller, get_project))
+    graph.add_edge(graph,"broad_synthesis", build_broad_synthesis_node(expansion_llm))
+    graph.add_edge(graph,"generator", build_generator_node(generation_llm, template_parser))
 
     graph.add_edge(START, "supervisor")
     graph.add_edge("direct_retriever", "generator")
@@ -95,8 +94,7 @@ def _build_phase2(*, classifier_llm, decomposer_llm, filter_llm, expansion_llm,
 
     graph.add_conditional_edges(
         "completeness_sweep",
-        traced("route_after_completeness_sweep")(
-            build_route_after_completeness_sweep(completeness_max_docs, completeness_max_attempts)),
+        build_route_after_completeness_sweep(completeness_max_docs, completeness_max_attempts),
         {"completeness_sweep": "completeness_sweep", "generator": "generator"},
     )
     graph.add_edge("generator", END)
@@ -108,19 +106,19 @@ def _build_phase3(*, classifier_llm, decomposer_llm, filter_llm, expansion_llm,
                    template_parser, get_project, completeness_max_docs,
                    completeness_max_attempts):
     graph = StateGraph(RAGState)
-    _node(graph,"supervisor", build_supervisor_node(classifier_llm))
-    _node(graph,"direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
-    _node(graph,"decomposer", build_decomposer_node(decomposer_llm))
-    _node(graph,"retrieve_subquery", build_retrieve_subquery_node(nlp_controller, get_project))
-    _node(graph,"constraint_filter", build_constraint_filter_node(filter_llm, nlp_controller, get_project))
-    _node(graph,"conflict_resolver", build_conflict_resolver_node(nlp_controller, get_project))
-    _node(graph,"completeness_sweep", build_completeness_sweep_node(nlp_controller, get_project))
-    _node(graph,"broad_synthesis", build_broad_synthesis_node(expansion_llm))
-    _node(graph,"generator", build_generator_node(generation_llm, template_parser))
-    _node(graph,"verifier", build_verifier_node(verifier_llm))
-    _node(graph,"reformulator", build_reformulator_node(reform_llm))
-    _node(graph,"info_not_found", build_info_not_found_node())
-    _node(graph,"finalize", build_finalize_node())
+    graph.add_edge(graph,"supervisor", build_supervisor_node(classifier_llm))
+    graph.add_edge(graph,"direct_retriever", build_direct_retriever_node(nlp_controller, get_project))
+    graph.add_edge(graph,"decomposer", build_decomposer_node(decomposer_llm))
+    graph.add_edge(graph,"retrieve_subquery", build_retrieve_subquery_node(nlp_controller, get_project))
+    graph.add_edge(graph,"constraint_filter", build_constraint_filter_node(filter_llm, nlp_controller, get_project))
+    graph.add_edge(graph,"conflict_resolver", build_conflict_resolver_node(nlp_controller, get_project))
+    graph.add_edge(graph,"completeness_sweep", build_completeness_sweep_node(nlp_controller, get_project))
+    graph.add_edge(graph,"broad_synthesis", build_broad_synthesis_node(expansion_llm))
+    graph.add_edge(graph,"generator", build_generator_node(generation_llm, template_parser))
+    graph.add_edge(graph,"verifier", build_verifier_node(verifier_llm))
+    graph.add_edge(graph,"reformulator", build_reformulator_node(reform_llm))
+    graph.add_edge(graph,"info_not_found", build_info_not_found_node())
+    graph.add_edge(graph,"finalize", build_finalize_node())
 
     graph.add_edge(START, "supervisor")
     graph.add_edge("direct_retriever", "generator")
@@ -131,15 +129,14 @@ def _build_phase3(*, classifier_llm, decomposer_llm, filter_llm, expansion_llm,
 
     graph.add_conditional_edges(
         "completeness_sweep",
-        traced("route_after_completeness_sweep")(
-            build_route_after_completeness_sweep(completeness_max_docs, completeness_max_attempts)),
+        build_route_after_completeness_sweep(completeness_max_docs, completeness_max_attempts),
         {"completeness_sweep": "completeness_sweep", "generator": "generator"},
     )
-
+ 
     graph.add_edge("generator", "verifier")
     graph.add_conditional_edges(
         "verifier",
-        traced("route_after_verifier")(route_after_verifier),
+        route_after_verifier,
         {"finalize": "finalize", "reformulator": "reformulator", "info_not_found": "info_not_found"},
     )
     graph.add_edge("reformulator", "direct_retriever")
@@ -199,14 +196,21 @@ async def run_rag_graph(app_graph, question: str, project_id: int, thread_id: st
     }
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": recursion_limit}
     
-    logger.info("[agent] RUN start thread=%s project=%s q=%r", thread_id, project_id, question)
     t0 = time.perf_counter()
     
-    result = await app_graph.ainvoke(initial_state, config=config)
+    agent_logger.info("RUN start project=%s q=%r", project_id, question)
+    try:
+        result = await app_graph.ainvoke(initial_state, config=config)
+    except Exception:
+        agent_logger.exception("RUN failed")
+        raise
     
-    logger.info("[agent] RUN end (%.0fs) type=%s agent=%s iters=%s chunks=%d error=%s",
-                (time.perf_counter() - t0) , result.get("question_type"),
-                result.get("active_agent"), result.get("iteration_count"),
-                len(result.get("retrieved_chunks", [])), result.get("error"))
+    agent_logger.info(
+        "RUN end type=%s agent=%s iters=%s chunks=%s answer_len=%s RUN end (%.0fs)",
+        result.get("question_type"), result.get("active_agent"), result.get("iteration_count"),
+        len(result.get("retrieved_chunks", [])),
+        len((result.get("final_answer") or result.get("draft_answer") or "")),
+        (time.perf_counter() - t0)
+    )
     
     return result
