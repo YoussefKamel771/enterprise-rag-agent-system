@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     CELERY_TASK_ACKS_LATE: bool = True
     CELERY_WORKER_CONCURRENCY: int = 1
     CELERY_FLOWER_PASSWORD: str = None
+    
+    # ========================= Agent (LangGraph) Config =========================
+    AGENT_CLASSIFIER_BACKEND_LITERAL: List[str] = ["OPENAI"]
+    AGENT_CLASSIFIER_BACKEND: str = "OPENAI"
+    AGENT_CLASSIFIER_MODEL_ID: str = "gpt-4o-mini"
+    AGENT_GRAPH_PHASE: int = 1
+    AGENT_MAX_ITERATIONS: int = 3
+    AGENT_COMPLETENESS_MAX_DOCS: int = 12
+    AGENT_COMPLETENESS_MAX_ATTEMPTS: int = 4
+    AGENT_RECURSION_LIMIT: int = 25
+    
     class Config:
         env_file = ".env"
 
