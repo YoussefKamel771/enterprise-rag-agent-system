@@ -7,7 +7,7 @@ aiofiles==23.2.1
 langchain==0.1.20
 PyMuPDF==1.24.3
 asyncio-contextmanager==1.0.1
-openai==1.66.0
+openai==3.19.2
 cohere==5.5.8
 SQLAlchemy==2.0.36
 asyncpg==0.30.0
@@ -15,6 +15,8 @@ alembic==1.14.0
 psycopg2==2.9.10
 pgvector==0.4.0
 nltk==3.9.1
+langgraph==1.2.11
+langchain-openai==1.6.6
 
 # Task Queue and Background Processing
 celery==5.5.3
