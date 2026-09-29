@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     AGENT_COMPLETENESS_MAX_ATTEMPTS: int = 4
     AGENT_RECURSION_LIMIT: int = 25
     
+    # ========================= Evaluation Harness Config =========================
+    AGENT_JUDGE_BACKEND_LITERAL: List[str] = ["OPENAI"]
+    AGENT_JUDGE_BACKEND: str = "OPENAI"
+    AGENT_JUDGE_MODEL_ID: str = "gpt-4o"
+ 
+    EVAL_QUESTIONS_PATH: str = "EnterpriseRAG-Bench/data/questions/test.parquet"
+    EVAL_PROJECT_ID: int = 1                 # project the benchmark corpus is indexed under
+    EVAL_CONCURRENCY: int = 5                # concurrent (agent-run + judge) pipelines in flight
+    EVAL_PREVIEW_CHARS: int = 4000           # tracing preview width during eval runs -- wide
+                                              # enough that draft_answer/generated answers aren't
+                                              # truncated before the judge or report.py see them
+    EVAL_RESULTS_DIR: str = "eval_results"
+    
     class Config:
         env_file = ".env"
 
