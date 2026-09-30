@@ -17,6 +17,7 @@ pgvector==0.4.0
 nltk==3.9.1
 langgraph==1.2.11
 langchain-openai==1.6.6
+langsmith>=0.4
 
 # Task Queue and Background Processing
 celery==5.5.3
