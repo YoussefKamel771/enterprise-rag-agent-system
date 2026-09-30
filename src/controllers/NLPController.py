@@ -5,6 +5,7 @@ from stores.llm.LLMEnums import DocumentTypeEnums
 from typing import List, Optional
 import json
 import logging
+from helpers.observability import traced_retriever
 
 class NLPController(BaseController):
 
@@ -79,7 +80,7 @@ class NLPController(BaseController):
 
         return True
 
-
+    @traced_retriever
     async def search_vector_db_collection(self, project: Project, text: str, 
                                           top_k: int = None, candidate_k: int = 40,
                                           debug: bool = False,
