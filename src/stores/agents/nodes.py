@@ -175,8 +175,8 @@ def build_completeness_sweep_node(nlp_controller, get_project):
         if not result.ok:
             logger.warning("[agent] completeness_sweep failed err=%s", result.error)
             
-        logger.info("[agent] completeness_sweep: excluded=%d new=%d", len(excluded), len(new_docs))
         new_docs = result.documents if result.ok else []
+        logger.info("[agent] completeness_sweep: excluded=%d new=%d", len(excluded), len(new_docs))
         return {
             "retrieved_chunks": new_docs,
             "excluded_chunk_ids": [d.chunk_id for d in new_docs],

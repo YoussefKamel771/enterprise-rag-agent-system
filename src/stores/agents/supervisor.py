@@ -71,7 +71,8 @@ def build_supervisor_node(
     # Phase-1 default: only the nodes that actually exist
     allowed = set(allowed_destinations or ["direct_retriever"])
 
-    structured_llm = classifier_llm.with_structured_output(SupervisorClassification)
+    structured_llm = classifier_llm.with_structured_output(
+        SupervisorClassification, method="function_calling")
     chain = _classification_prompt | structured_llm
 
     async def supervisor_node(state: RAGState) -> Command:
@@ -80,8 +81,14 @@ def build_supervisor_node(
                 {"question": state["question"]}
             )
         except Exception as exc:
-            logger.exception("Supervisor classification failed")
-            return Command(update={"error": f"classification_failed: {exc}"}, goto=END)
+            logger.exception("Supervisor classification failed, falling back to direct_retriever")
+            return Command(
+                update={"question_type": "basic", "active_agent": "direct_retriever",
+                        "retrieval_attempts": 0,
+                        "iteration_count": state.get("iteration_count", 0),
+                        "max_iterations": state.get("max_iterations", default_max_iterations)},
+                goto="direct_retriever",
+            )
 
         destination = ROUTE_TABLE.get(result.question_type, "direct_retriever")
 
