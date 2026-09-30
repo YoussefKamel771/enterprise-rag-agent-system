@@ -1,16 +1,18 @@
 """
-eval/run_agent.py -- Section 6.2
+eval/run_agent.py
 
-`build_eval_dependencies` mirrors main.py's lifespan client construction
-(same factories, same shape) so the benchmark exercises the exact same
-provider wiring the FastAPI app uses -- built once per benchmark process,
-reused across every question. `run_one` drives a single question through
-the graph inside a tracing `run_context`, then immediately judges the
-result; run_benchmark.py wraps this in a concurrency-limited gather.
+`build_eval_dependencies` mirrors main.py's lifespan wiring (same factories),
+built once per benchmark process. `run_question` is the LangSmith *target*:
+it drives one question through the graph and returns a small JSON-safe dict
+that the evaluators read.
+
+No custom tracing here: LangSmith records the full span tree (nodes, LLM
+calls, retriever, tokens, latency). We only stream node updates to record
+WHICH nodes ran, because the evaluators (routing / sweep / filter checks)
+need that as data rather than as a trace to browse.
 """
 
 import logging
-import time
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -20,26 +22,16 @@ from stores.llm import LLMProviderFactory
 from stores.vectordb import VectorDBProviderFactory
 from stores.reranker import RerankerProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
-from stores.agents import build_rag_graph, run_rag_graph
-from stores.agents.tracing import run_context, configure_tracing
+from stores.agents import build_rag_graph
+from stores.agents.graph import make_initial_state, make_config
 from controllers import NLPController
 from models import ProjectModel
-
-from .load_questions import BenchQuestion
-from .retrieval_metrics import compute_retrieval_metrics
-from .routing_checks import run_category_checks
-from .telemetry import extract_telemetry, token_usage, extract_draft_answers
-from .judge import build_judge_llm, build_judge_chain, judge_one
 
 logger = logging.getLogger("uvicorn.eval")
 
 
 async def build_eval_dependencies(settings=None) -> dict:
     settings = settings or get_settings()
-    # Wide preview so draft/final answer text isn't truncated before the
-    # judge or report.py's aggregation ever sees it (see telemetry.py's
-    # extract_draft_answers docstring).
-    configure_tracing(level="INFO", preview_chars=settings.EVAL_PREVIEW_CHARS)
 
     postgres_conn = (
         f"postgresql+asyncpg://{settings.POSTGRES_USERNAME}:{settings.POSTGRES_PASSWORD}"
@@ -89,69 +81,84 @@ async def build_eval_dependencies(settings=None) -> dict:
         get_project=get_project,
     )
 
-    judge_llm = build_judge_llm(settings)
-    judge_chain = build_judge_chain(judge_llm)
+    return {"settings": settings, "engine": engine, "rag_graph": rag_graph}
 
+
+def _summarize_step(node: str, update) -> dict:
+    """Compact, JSON-safe record of one node execution -- only the fields
+    the evaluators need. Full detail lives in the LangSmith trace."""
+    step = {"node": node}
+    if isinstance(update, dict):
+        if "retrieved_chunks" in update:
+            step["n_chunks"] = len(update["retrieved_chunks"] or [])
+        if "retrieval_filters" in update:
+            step["retrieval_filters"] = update["retrieval_filters"]
+        if update.get("draft_answer"):
+            step["draft_answer"] = update["draft_answer"]
+        if "grounding_passed" in update:
+            step["grounding_passed"] = update["grounding_passed"]
+    return step
+
+
+def _doc_dict(d) -> dict:
     return {
-        "settings": settings,
-        "engine": engine,
-        "db_client": db_client,
-        "rag_graph": rag_graph,
-        "judge_chain": judge_chain,
+        "doc_id": d.doc_id,
+        "chunk_id": d.chunk_id,
+        "source_type": d.source_type,
+        "score": round(float(d.score), 4),
+        "metadata": d.metadata,
     }
 
 
-async def run_one(question: BenchQuestion, deps: dict, project_id: int, phase: int, run_tag: str) -> dict:
+async def run_question(deps: dict, inputs: dict, project_id: int, phase: int, run_tag: str) -> dict:
+    """LangSmith target. Exceptions are NOT swallowed: a crashed run shows up
+    as an errored run in the experiment (and is skipped by evaluators)
+    instead of being scored as a wrong answer."""
     settings = deps["settings"]
-    thread_id = f"eval-{run_tag}-{question.question_id}"
+    graph = deps["rag_graph"]
+    question_id = inputs["question_id"]
 
-    started = time.perf_counter()
-    error = None
-    final_state: dict = {}
-    trace: list = []
+    thread_id = f"eval-{run_tag}-{question_id}"
+    config = make_config(
+        thread_id,
+        recursion_limit=settings.AGENT_RECURSION_LIMIT,
+        run_name=f"rag_agent_phase{phase}",
+        tags=[f"phase:{phase}", f"run_tag:{run_tag}"],
+        metadata={"question_id": question_id, "phase": phase},
+    )
+    state = make_initial_state(inputs["question"], project_id, settings.AGENT_MAX_ITERATIONS)
 
-    with run_context(thread_id, debug=True) as (_run_id, trace):
-        try:
-            final_state = await run_rag_graph(
-                deps["rag_graph"], question=question.question, project_id=project_id,
-                thread_id=thread_id, max_iterations=settings.AGENT_MAX_ITERATIONS,
-                recursion_limit=settings.AGENT_RECURSION_LIMIT,
-            )
-        except Exception as exc:
-            logger.exception("Agent run failed for question_id=%s", question.question_id)
-            error = repr(exc)
-    wall_ms = round((time.perf_counter() - started) * 1000)
+    steps: list[dict] = []
+    async for chunk in graph.astream(state, config=config, stream_mode="updates"):
+        for node, update in chunk.items():
+            steps.append(_summarize_step(node, update))
 
-    generated_answer = final_state.get("final_answer") or final_state.get("draft_answer") or ""
+    steps: list[dict] = []
+    final: dict = {}
+    async for mode, payload in graph.astream(
+        state, config=config, stream_mode=["updates", "values"]
+    ):
+        if mode == "updates":
+            for node, update in payload.items():
+                steps.append(_summarize_step(node, update))
+        else:                      # "values": full state after each step; last one wins
+            final = payload
 
-    retrieval = compute_retrieval_metrics(final_state, question.expected_doc_ids)
-    routing = run_category_checks(question.question_type, trace, final_state, question.expected_doc_ids)
-    telem = extract_telemetry(trace, final_state)
-    telem.update(token_usage(trace))
-    telem["wall_clock_ms"] = wall_ms
-    draft_answers = extract_draft_answers(trace)
-
-    verdict = None
-    if error is None:
-        try:
-            verdict = await judge_one(
-                deps["judge_chain"], question.question, question.gold_answer,
-                question.answer_facts, generated_answer, question.question_type,
-            )
-        except Exception:
-            logger.exception("Judge call failed for question_id=%s", question.question_id)
+    # A supervisor/graph failure is an infra error, not a wrong answer:
+    # raise so LangSmith marks the run errored and evaluators skip it.
+    if final.get("error") and not (final.get("final_answer") or final.get("draft_answer")):
+        raise RuntimeError(final["error"])
 
     return {
-        "question_id": question.question_id,
-        "question_type": question.question_type,
-        "phase": phase,
-        "run_tag": run_tag,
-        "error": error,
-        "final_state": final_state,
-        "generated_answer": generated_answer,
-        "draft_answers": draft_answers,
-        "retrieval": retrieval,
-        "routing": routing,
-        "telemetry": telem,
-        "judge_verdict": verdict,
+        "answer": final.get("final_answer") or final.get("draft_answer") or "",
+        "draft_answers": [s["draft_answer"] for s in steps if s.get("draft_answer")],
+        "citations": final.get("citations", []),
+        "question_type": final.get("question_type"),
+        "active_agent": final.get("active_agent"),
+        "iteration_count": final.get("iteration_count", 0),
+        "max_iterations": final.get("max_iterations", settings.AGENT_MAX_ITERATIONS),
+        "retrieval_attempts": final.get("retrieval_attempts", 0),
+        "retrieved_docs": [_doc_dict(d) for d in final.get("retrieved_chunks", [])],
+        "steps": steps,
+        "error": final.get("error"),
     }

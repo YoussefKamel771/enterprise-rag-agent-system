@@ -1,108 +1,68 @@
 """
-eval/routing_checks.py -- Section 3
+eval/routing_checks.py
 
-Validates that questions reach the graph nodes ROUTE_TABLE says they should,
-and runs the four per-category checks named in the evaluation framework:
-Info Not Found -> info_not_found, Completeness -> completeness_sweep
-convergence, Conflicting Info -> conflict_resolver clustering, Constrained ->
-constraint_filter extraction quality.
+Per-category checks, computed from the target's `outputs["steps"]` (node
+names recorded while streaming the graph) instead of a hand-rolled trace.
+Each returned value is numeric/bool so evaluators.py can emit it directly as
+LangSmith feedback.
 """
 
-from stores.agents.supervisor import ROUTE_TABLE
+
+def _nodes(steps: list[dict], name: str) -> list[dict]:
+    return [s for s in steps if s.get("node") == name]
 
 
-def routing_accuracy(results: list[dict], ground_truth: dict[str, str]) -> dict:
-    """results: [{question_id, question_type (predicted), active_agent}, ...]
-    ground_truth: {question_id: question_type (from the parquet)}"""
-    classification_correct = 0
-    routing_correct = 0
-    confusion: dict[tuple, int] = {}
-
-    for r in results:
-        true_type = ground_truth.get(r["question_id"])
-        pred_type = r.get("question_type")
-        confusion[(true_type, pred_type)] = confusion.get((true_type, pred_type), 0) + 1
-        if pred_type == true_type:
-            classification_correct += 1
-        if r.get("active_agent") == ROUTE_TABLE.get(pred_type):
-            routing_correct += 1
-
-    n = len(results) or 1
+def check_info_not_found_routing(outputs: dict, expected_doc_ids: list[str]) -> dict:
+    steps = outputs.get("steps", [])
+    reached = bool(_nodes(steps, "info_not_found"))
+    exhausted = outputs.get("iteration_count", 0) >= outputs.get("max_iterations", 3)
     return {
-        "classification_accuracy": classification_correct / n,
-        "routing_correctness": routing_correct / n,  # expect ~1.0; below that is a code bug, not a model-quality issue
-        "confusion_matrix": {f"{t}->{p}": c for (t, p), c in confusion.items()},
+        "reached_info_not_found": reached,
+        "verifier_calls": len(_nodes(steps, "verifier")),
+        "gave_up_at_cap": reached and exhausted,
+        # corpus DID have the answer but grounding still failed
+        "false_info_not_found": reached and bool(expected_doc_ids),
     }
 
 
-def check_info_not_found_routing(trace: list[dict], final_state: dict, expected_doc_ids: list[str]) -> dict:
-    reached_info_not_found = any(e.get("node") == "info_not_found" for e in trace)
-    verifier_entries = [e for e in trace if e.get("node") == "verifier"]
-    exhausted_iterations = final_state.get("iteration_count", 0) >= final_state.get("max_iterations", 3)
+def check_completeness_sweep(outputs: dict) -> dict:
+    sweeps = _nodes(outputs.get("steps", []), "completeness_sweep")
     return {
-        "reached_info_not_found": reached_info_not_found,
-        "verifier_calls": len(verifier_entries),
-        "gave_up_at_cap": reached_info_not_found and exhausted_iterations,
-        # a "false info_not_found" -- the corpus DID have the answer but grounding still failed
-        "false_info_not_found": reached_info_not_found and bool(expected_doc_ids),
+        "sweep_iterations": len(sweeps),
+        "sweep_triggered": len(sweeps) >= 1,
+        "sweep_looped_more_than_once": len(sweeps) >= 2,
+        "final_chunk_count": len(outputs.get("retrieved_docs", [])),
     }
 
 
-def check_completeness_sweep(trace: list[dict], expected_doc_ids: list[str]) -> dict:
-    sweep_entries = [e for e in trace if e.get("node") == "completeness_sweep"]
-    router_entries = [e for e in trace if e.get("node") == "router:completeness_sweep"]
-    final_chunk_count = (sweep_entries[-1].get("update") or {}).get("chunks", 0) if sweep_entries else 0
+def check_conflict_clustering(outputs: dict) -> dict:
+    docs = outputs.get("retrieved_docs", [])
+    with_recency = sum(1 for d in docs if (d.get("metadata") or {}).get("last_modified"))
     return {
-        "sweep_iterations": len(sweep_entries),
-        "triggered": len(sweep_entries) >= 1,
-        "looped_more_than_once": len(sweep_entries) >= 2,
-        "final_recall_vs_expected": final_chunk_count / max(len(expected_doc_ids), 1),
-        "stop_reason": router_entries[-1].get("decision") if router_entries else None,
+        "distinct_docs_retrieved": len({d["doc_id"] for d in docs}),
+        "recency_metadata_present": with_recency / max(len(docs), 1),
     }
 
 
-def check_conflict_clustering(retrieved_chunks: list) -> dict:
-    doc_ids = {getattr(d, "doc_id", None) for d in retrieved_chunks}
-    doc_ids.discard(None)
-    last_modified = [
-        (getattr(d, "metadata", {}) or {}).get("last_modified")
-        for d in retrieved_chunks
-        if (getattr(d, "metadata", {}) or {}).get("last_modified")
-    ]
-    n = len(retrieved_chunks) or 1
+def check_constraint_filter(outputs: dict) -> dict:
+    entries = _nodes(outputs.get("steps", []), "constraint_filter")
+    if not entries:
+        return {"filter_triggered": False}
+    filters = entries[-1].get("retrieval_filters") or {}
     return {
-        "distinct_docs_retrieved": len(doc_ids),
-        "recency_metadata_present": len(last_modified) / n,
-    }
-
-
-def check_constraint_filter(trace: list[dict]) -> dict:
-    filter_entries = [e for e in trace if e.get("node") == "constraint_filter"]
-    if not filter_entries:
-        return {"triggered": False}
-    update = filter_entries[-1].get("update") or {}
-    filters = update.get("retrieval_filters") or {}
-    return {
-        "triggered": True,
+        "filter_triggered": True,
         "extracted_nonempty_filter": bool(filters.get("source_types") or filters.get("other_equals")),
         "fell_back_to_unfiltered": bool(filters.get("fallback_unfiltered", False)),
     }
 
 
-# ---------------------------------------------------------------------------
-# Dispatch: run the category-specific check that applies to this question,
-# so run_agent.py doesn't need a long if/elif chain of its own.
-# ---------------------------------------------------------------------------
-
-def run_category_checks(question_type: str, trace: list[dict], final_state: dict,
-                        expected_doc_ids: list[str]) -> dict:
-    checks: dict = {}
+def run_category_checks(question_type: str, outputs: dict, expected_doc_ids: list[str]) -> dict:
     if question_type == "info_not_found":
-        checks.update(check_info_not_found_routing(trace, final_state, expected_doc_ids))
+        return check_info_not_found_routing(outputs, expected_doc_ids)
     if question_type == "completeness":
-        checks.update(check_completeness_sweep(trace, expected_doc_ids))
+        return check_completeness_sweep(outputs)
     if question_type == "conflicting_info":
-        checks.update(check_conflict_clustering(final_state.get("retrieved_chunks", [])))
+        return check_conflict_clustering(outputs)
     if question_type == "constrained":
-        checks.update(check_constraint_filter(trace))
-    return checks
+        return check_constraint_filter(outputs)
+    return {}
