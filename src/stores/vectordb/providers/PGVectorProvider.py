@@ -498,8 +498,8 @@ class PGVectorProvider(VectorDBInterface):
             return None
 
         dense_rows, lexical_rows = await asyncio.gather(
-            self._search_dense(collection_name, query_vector, limit, offset, filters, exclude_chunk_ids),
-            self._search_lexical(collection_name, query_text, limit, offset, filters, exclude_chunk_ids),
+            self.search_by_vector(collection_name, query_vector, limit, offset, filters, exclude_chunk_ids),
+            self.search_lexical(collection_name, query_text, limit, offset, filters, exclude_chunk_ids),
         )
 
         if not dense_rows and not lexical_rows:

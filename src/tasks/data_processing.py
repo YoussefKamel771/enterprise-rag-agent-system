@@ -71,12 +71,15 @@ async def _process_assets(self, parquet_path: str, project_id: int, strategy: st
         missing_content = 0
         matched_ids = set()
         processed = 0
+        
+        # Include source_type so auto/source_aware can route correctly
+        columns = ["doc_id", "content", "source_type", "title"]
 
         # Stream the parquet file batch by batch, exactly like the
         # original script: chunk + insert per batch, then let that
         # batch's rows/pending chunks be collected before the next loads.
         for rows in data_controller.iter_parquet_batches(
-            parquet_path=parquet_path, columns=["doc_id", "content"], batch_size=batch_size
+            parquet_path=parquet_path, columns=columns, batch_size=batch_size
         ):
             pending = []
 
@@ -91,6 +94,7 @@ async def _process_assets(self, parquet_path: str, project_id: int, strategy: st
                 matched_ids.add(doc_id)
                 content = clean_text(row.get("content") or "")
                 asset = asset_by_id[doc_id]
+                source_type = (row.get("source_type") or "").lower().strip()
                 processed += 1
 
                 if not content:
@@ -104,6 +108,7 @@ async def _process_assets(self, parquet_path: str, project_id: int, strategy: st
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap,
                         strategy=strategy,
+                        source_type=source_type
                     )
                 except Exception as e:
                     logger.warning(f"Failed to chunk asset {asset.asset_id}: {e}")

@@ -36,7 +36,6 @@ class AssetModel(BaseDataModel):
                 {
                     "asset_id": asset.asset_id,
                     "asset_uuid": asset.asset_uuid or uuid.uuid4(),
-                    "asset_uuid": asset.asset_uuid,
                     "asset_source_type": asset.asset_source_type,
                     "asset_name": asset.asset_name,
                     "asset_size": asset.asset_size,
