@@ -5,7 +5,8 @@ import logging
 from typing import List, Union
 import numpy as np
 import asyncio
-
+from langsmith.wrappers import wrap_openai
+  
 class OpenAIProvider(LLMInterface):
     def __init__(self, api_key: str, api_url: str = None, 
                  default_input_max_characters: int = 1000, 
@@ -25,10 +26,10 @@ class OpenAIProvider(LLMInterface):
 
         self.enums = OpenAIEnums
 
-        self.client = OpenAI(
-            api_key=self.api_key,
+        self.client = wrap_openai(
+            OpenAI(api_key=self.api_key,
             base_url=self.api_url if self.api_url and len(self.api_url) else None
-        )
+        ))
 
         self.logger = logging.getLogger("uvicorn")
 

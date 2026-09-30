@@ -1,3 +1,2 @@
-from .CoHereProvider import CoHereProvider
 from .OpenAIProvider import OpenAIProvider
 from .SentenceTransformerProvider import SentenceTransformerProvider
