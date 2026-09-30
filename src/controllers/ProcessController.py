@@ -26,7 +26,8 @@ class ProcessController(BaseController):
     # ------------------------------------------------------------------
 
     def build_enterprise_rag_chunks(self, asset, content: str, chunk_size: int = 1000,
-                                    chunk_overlap: int = 100, strategy: str = "recursive"):
+                                    chunk_overlap: int = 100, strategy: str = "recursive", 
+                                    source_type: str = None):
         """
         Chunk a single already-ingested Asset's content (re-derived from the
         source parquet) into DataChunk records ready for bulk insert.
@@ -34,10 +35,15 @@ class ProcessController(BaseController):
         Extra metadata (strategy/char_count/token_count) is stored in
         chunk_metadata since DataChunk has no dedicated columns for it.
         """
-        chunker = ChunkerFactory.get_chunker(strategy, 
-                                             chunk_size=chunk_size, 
-                                             chunk_overlap=chunk_overlap, 
-                                             length_function=token_length)
+        kwargs = {
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "length_function": token_length,
+        }
+        if strategy == "auto":
+            kwargs["source_type"] = source_type 
+            
+        chunker = ChunkerFactory.get_chunker(strategy, **kwargs)
         pieces = chunker.chunk(content)
 
 
@@ -48,7 +54,8 @@ class ProcessController(BaseController):
                 chunk_strategy=strategy,
                 chunk_metadata={
                     "doc_id": asset.asset_id,
-                    "source_type":asset.asset_source_type
+                    "source_type":asset.asset_source_type,
+                    "title":asset.asset_name
                     },
                 chunk_char_count=len(piece),
                 chunk_token_count=token_length(piece),
