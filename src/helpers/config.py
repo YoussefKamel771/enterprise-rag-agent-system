@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = None
     OPENAI_API_URL: str = None
     COHERE_API_KEY: str = None
+    
+    CHUNKING_STRATEGY: str
+    
+    FIREFLIES_CHUNK_SIZE: int 
+    FIREFLIES_CHUNK_OVERLAP: int
+    CONFLUENCE_CHUNK_SIZE: int 
+    CONFLUENCE_CHUNK_OVERLAP: int 
+    SLACK_CHUNK_SIZE: int 
+    SLACK_CHUNK_OVERLAP: int 
+    TICKET_CHUNK_SIZE: int 
+    TICKET_CHUNK_OVERLAP: int 
+    GMAIL_CHUNK_SIZE: int 
+    GMAIL_CHUNK_OVERLAP: int 
+    RECURSIVE_CHUNK_SIZE: int 
+    RECURSIVE_CHUNK_OVERLAP: int 
 
     GENERATION_MODEL_ID_LITERAL: List[str] = None
     GENERATION_MODEL_ID: str = None
@@ -93,3 +108,5 @@ class Settings(BaseSettings):
 
 def get_settings():
     return Settings()
+
+
