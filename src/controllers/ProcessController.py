@@ -25,8 +25,7 @@ class ProcessController(BaseController):
     # Bulk dataset chunking (EnterpriseRAG-Bench and similar datasets)
     # ------------------------------------------------------------------
 
-    def build_enterprise_rag_chunks(self, asset, content: str, chunk_size: int = 1000,
-                                    chunk_overlap: int = 100, strategy: str = "recursive", 
+    def build_enterprise_rag_chunks(self, asset, content: str,
                                     source_type: str = None):
         """
         Chunk a single already-ingested Asset's content (re-derived from the
@@ -35,15 +34,9 @@ class ProcessController(BaseController):
         Extra metadata (strategy/char_count/token_count) is stored in
         chunk_metadata since DataChunk has no dedicated columns for it.
         """
-        kwargs = {
-        "chunk_size": chunk_size,
-        "chunk_overlap": chunk_overlap,
-        "length_function": token_length,
-        }
-        if strategy == "auto":
-            kwargs["source_type"] = source_type 
-            
-        chunker = ChunkerFactory.get_chunker(strategy, **kwargs)
+        
+
+        chunker = ChunkerFactory.get_chunker(source=source_type)
         pieces = chunker.chunk(content)
 
 
@@ -51,11 +44,12 @@ class ProcessController(BaseController):
             DataChunk(
                 chunk_text=piece,
                 chunk_order=order + 1,
-                chunk_strategy=strategy,
+                chunk_strategy="Source-aware",
                 chunk_metadata={
                     "doc_id": asset.asset_id,
                     "source_type":asset.asset_source_type,
-                    "title":asset.asset_name
+                    "title":asset.asset_name,
+                    "chunk_index": order+1,
                     },
                 chunk_char_count=len(piece),
                 chunk_token_count=token_length(piece),

@@ -91,9 +91,6 @@ async def process_and_index(request: Request, project_id: int, body: PipelineReq
         )
 
     process_kwargs = dict(
-        strategy=body.strategy,
-        chunk_size=body.chunk_size,
-        chunk_overlap=body.chunk_overlap,
         batch_size=body.batch_size,
         delete_existing=body.delete_existing,
         skip_chunked=body.skip_chunked,

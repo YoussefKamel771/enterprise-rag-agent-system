@@ -17,8 +17,7 @@ from tasks.utils import resolve_doc_ids
 logger = logging.getLogger("celery.chunking_tasks")
 
 
-async def _process_assets(self, parquet_path: str, project_id: int, strategy: str,
-                         chunk_size: int, chunk_overlap: int, batch_size: int,
+async def _process_assets(self, parquet_path: str, project_id: int, batch_size: int,
                          delete_existing: bool, skip_chunked: bool,
                          document_set: str = None, document_set_kwargs: dict = None):
     (db_engine, db_client, llm_provider_factory, 
@@ -105,9 +104,6 @@ async def _process_assets(self, parquet_path: str, project_id: int, strategy: st
                     asset_chunks = process_controller.build_enterprise_rag_chunks(
                         asset=asset,
                         content=content,
-                        chunk_size=chunk_size,
-                        chunk_overlap=chunk_overlap,
-                        strategy=strategy,
                         source_type=source_type
                     )
                 except Exception as e:
@@ -146,7 +142,7 @@ async def _process_assets(self, parquet_path: str, project_id: int, strategy: st
             "assets_skipped_empty_content": missing_content,
             "assets_not_found_in_parquet": unmatched,
             "project_id": project_id,
-            "strategy": strategy,
+            "strategy": "source_aware",
         }
 
     finally:
@@ -161,9 +157,6 @@ def process_assets(self,
                                                      "data", 
                                                      "documents",
                                                      "test.parquet"),
-                    strategy: str = "recursive",
-                    chunk_size: int = 500, 
-                    chunk_overlap: int = 50,
                     batch_size: int = 500,
                     delete_existing: bool = False,
                     skip_chunked: bool = False,
@@ -178,8 +171,7 @@ def process_assets(self,
     """
     try:
         return asyncio.run(
-            _process_assets(self, parquet_path, project_id, strategy,
-                          chunk_size, chunk_overlap, batch_size,
+            _process_assets(self, parquet_path, project_id, batch_size,
                           delete_existing, skip_chunked,
                            document_set, document_set_kwargs)
         )
