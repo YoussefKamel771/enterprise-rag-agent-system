@@ -45,6 +45,14 @@ def build_direct_retriever_node(nlp_controller, get_project):
 def build_generator_node(generation_llm, template_parser):
     async def generator_node(state: RAGState) -> dict:
         chunks = state.get("retrieved_chunks", [])
+        # dedupe by chunk_id, keep best score, drop weak ones, cap the total
+        best = {}
+        for d in chunks:
+            s = getattr(d, "score", 0) or 0
+            if d.chunk_id not in best or s > best[d.chunk_id][0]:
+                best[d.chunk_id] = (s, d)
+        ranked = sorted(best.values(), key=lambda x: x[0], reverse=True)
+        chunks = [d for s, d in ranked if s >= 0.3][:8]
         if not chunks:
             return {"draft_answer": None, "error": "no_chunks_to_generate_from"}
 
@@ -58,10 +66,19 @@ def build_generator_node(generation_llm, template_parser):
 
         logger.info("[agent] generator: %d chunks, prompt=%d chars, docs=%s",
             len(chunks), len(full_prompt), sorted({d.doc_id for d in chunks}))
-        answer = await generation_llm.generate_text(
-            prompt=full_prompt,
-            chat_history=[generation_llm.construct_prompt(system_prompt, role="system")],
-        )
+        
+        try:
+            answer = await generation_llm.generate_text(
+                prompt=full_prompt,
+                chat_history=[generation_llm.construct_prompt(system_prompt, role="system")],
+            )
+        except Exception as exc:
+            logger.exception("[agent] generator failed")
+            return {"draft_answer": None, "error": f"generation_failed: {exc}"}
+        
+        if not answer:
+            return {"draft_answer": None, "error": "generation_returned_empty"}
+        
         logger.info("[agent] generator: answer=%d chars", len(answer or ""))
         return {"draft_answer": answer, "citations": sorted({doc.doc_id for doc in chunks})}
     return generator_node
@@ -82,7 +99,8 @@ _DECOMPOSE_PROMPT = ChatPromptTemplate.from_messages([
 def build_decomposer_node(decomposer_llm):
     """Fans out via `Send` -- LangGraph's built-in dynamic-parallelism
     primitive -- to the shared `retrieve_subquery` worker node."""
-    chain = _DECOMPOSE_PROMPT | decomposer_llm.with_structured_output(SubQuestions)
+    chain = _DECOMPOSE_PROMPT | decomposer_llm.with_structured_output(
+        SubQuestions, method="function_calling")
 
     async def decomposer_node(state: RAGState) -> Command[Literal["retrieve_subquery"]]:
         result: SubQuestions = await chain.ainvoke({"question": state["question"]})
@@ -116,10 +134,15 @@ _FILTER_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def build_constraint_filter_node(filter_llm, nlp_controller, get_project):
-    chain = _FILTER_EXTRACTION_PROMPT | filter_llm.with_structured_output(ExtractedFilters)
+    chain = _FILTER_EXTRACTION_PROMPT | filter_llm.with_structured_output(
+        ExtractedFilters, method="function_calling")
 
     async def constraint_filter_node(state: RAGState) -> dict:
-        extracted: ExtractedFilters = await chain.ainvoke({"question": state["question"]})
+        try:
+            extracted = await chain.ainvoke({"question": state["question"]})
+        except Exception:
+            logger.exception("[agent] constraint_filter extraction failed, using no filters")
+            extracted = ExtractedFilters()   # assumes all fields have defaults
         
         filters = MetadataFilter(
             equals=extracted.other_equals,
@@ -199,7 +222,8 @@ def build_route_after_completeness_sweep(max_docs: int, max_attempts: int):
 
 
 def build_broad_synthesis_node(expansion_llm):
-    chain = _DECOMPOSE_PROMPT | expansion_llm.with_structured_output(SubQuestions)
+    chain = _DECOMPOSE_PROMPT | expansion_llm.with_structured_output(
+        SubQuestions, method="function_calling")
 
     async def broad_synthesis_node(state: RAGState) -> Command[Literal["retrieve_subquery"]]:
         result: SubQuestions = await chain.ainvoke({"question": state["question"]})
@@ -220,7 +244,8 @@ _CLAIM_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def build_verifier_node(verifier_llm):
-    chain = _CLAIM_EXTRACTION_PROMPT | verifier_llm.with_structured_output(DraftClaims)
+    chain = _CLAIM_EXTRACTION_PROMPT | verifier_llm.with_structured_output(
+        DraftClaims, method="function_calling")
 
     async def verifier_node(state: RAGState) -> dict:
         draft = state.get("draft_answer")
