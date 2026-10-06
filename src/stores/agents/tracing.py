@@ -86,8 +86,14 @@ def traced(name: str | None = None):
 
         @functools.wraps(fn)
         def wrapper(state, *a, **kw):
+            _log_enter(label, state)
             t0 = time.perf_counter()
-            out = fn(state, *a, **kw)
+            try:
+                out = fn(state, *a, **kw)
+            except Exception:
+                logger.exception("[agent] !! %s raised after %.0fms",
+                                 label, (time.perf_counter() - t0) * 1000)
+                raise
             _log_exit(label, out, t0)
             return out
         return wrapper
