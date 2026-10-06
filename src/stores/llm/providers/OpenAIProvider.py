@@ -70,12 +70,16 @@ class OpenAIProvider(LLMInterface):
                 
         )
 
-        response = self.client.chat.completions.create(
-            model=self.generation_model_id,
-            messages=chat_history,
-            max_tokens=max_output_tokens,
-            temperature=temperature 
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.generation_model_id,
+                messages=chat_history,
+                max_tokens=max_output_tokens,
+                temperature=temperature 
+            )
+        except Exception:
+            self.logger.exception("Error while generating text with OpenAI")
+            raise   # let generator_node's try/except handle it
 
         if not response or not response.choices or len(response.choices) == 0 or not response.choices[0].message.content:
             self.logger.error("Error while generating text with OpenAI")
