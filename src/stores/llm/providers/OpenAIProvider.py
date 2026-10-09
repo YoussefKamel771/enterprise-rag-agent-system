@@ -75,14 +75,34 @@ class OpenAIProvider(LLMInterface):
                 model=self.generation_model_id,
                 messages=chat_history,
                 max_tokens=max_output_tokens,
-                temperature=temperature 
+                temperature=temperature,
+                extra_body={
+                    "options": {"num_ctx": 16384},
+                    "think": False,
+                }     
             )
-        except Exception:
-            self.logger.exception("Error while generating text with OpenAI")
-            raise   # let generator_node's try/except handle it
+        except Exception as exc:
+            self.logger.error(
+                "OpenAI generate_text failed | model=%s max_tokens=%s temperature=%s "
+                "n_messages=%d prompt_chars=%d | %s: %s",
+                self.generation_model_id, max_output_tokens, temperature,
+                len(chat_history), sum(len(m["content"]) for m in chat_history),
+                type(exc).__name__, str(exc),
+            )
+            raise
 
-        if not response or not response.choices or len(response.choices) == 0 or not response.choices[0].message.content:
-            self.logger.error("Error while generating text with OpenAI")
+        msg = response.choices[0].message if response and response.choices else None
+        reasoning_text = getattr(msg, "reasoning", "") or "" if msg else ""
+        if not response or not response.choices or not msg or not msg.content:
+            self.logger.error(
+                "Empty generation | finish_reason=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s content_len=%s reasoning_len=%s",
+                response.choices[0].finish_reason if response and response.choices else None,
+                response.usage.prompt_tokens if response else None,
+                response.usage.completion_tokens if response else None,
+                response.usage.total_tokens if response else None,
+                len(msg.content) if msg and msg.content else 0,
+                len(reasoning_text),
+            )
             return None
          
         return response.choices[0].message.content

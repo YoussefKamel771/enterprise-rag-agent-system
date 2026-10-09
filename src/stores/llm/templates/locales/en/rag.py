@@ -31,3 +31,11 @@ footer_prompt = Template("\n".join([
     "",
     "## Answer:",
 ]))
+
+#### Memory (background about the user; NOT evidence) ####
+memory_prompt = Template("\n".join([
+    "## Background about the user (NOT a source of facts):",
+    "$memories",
+    "Use this only to interpret the question or tailor the response. "
+    "Never state it as a fact about the company and never cite it; answer only from the documents.",
+]))
