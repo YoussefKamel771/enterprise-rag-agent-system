@@ -32,6 +32,7 @@ def build_supervisor_node(
     classifier_llm,
     default_max_iterations: int = 3,
     allowed_destinations: Optional[Iterable[str]] = None,
+    on_failure: str = END,
 ):
     """
     allowed_destinations: nodes that actually exist in the graph being built.
@@ -53,7 +54,7 @@ def build_supervisor_node(
             result: SupervisorClassification = await chain.ainvoke({"question": state["question"]})
         except Exception as exc:
             logger.exception("Supervisor classification failed")
-            return Command(update={"error": f"classification_failed: {exc}"}, goto=END)
+            return Command(update={"error": f"classification_failed: {exc}"}, goto=on_failure)
 
         intended = ROUTE_TABLE.get(result.question_type, DIRECT_RETRIEVER)
         destination = intended

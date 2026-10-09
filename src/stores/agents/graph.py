@@ -1,21 +1,22 @@
 """
 stores/agents/graph.py
-
+ 
 Public surface: `build_rag_graph(settings, nlp_controller, generation_client,
-template_parser, get_project)` -- signature unchanged, so main.py and
-eval/run_agent.py need no edits.
-
-The three near-identical `_build_phaseN` functions are replaced by ONE
-`AgentGraphBuilder` that composes the graph from additive layers:
-
+template_parser, get_project, checkpointer=None, memory_service=None)`.
+The two new kwargs are optional, so existing callers keep working.
+ 
+Layers (additive):
     phase 1: core          supervisor -> direct_retriever -> generator
     phase 2: + specialists decomposer / constraint_filter / conflict_resolver /
                            completeness_sweep / broad_synthesis
     phase 3: + verification generator -> verifier -> (finalize | reformulator
                            | info_not_found)
-
-Adding a phase is a new PhaseSpec entry plus (at most) one `_add_*` method,
-not a fourth copy of the whole wiring.
+    memory : + short-term  START -> load_context -> contextualize
+                                 [-> recall_memory] -> supervisor ... -> commit_turn -> END
+ 
+Memory is orthogonal to the phases: the entry node and the terminal node are
+variables, so EVERY exit (generator in phases 1-2, finalize / info_not_found in
+phase 3, supervisor failure) funnels through `commit_turn`.
 """
 
 import logging
@@ -26,16 +27,19 @@ from langgraph.graph import END, START, StateGraph
 from .config import AgentConfig
 from .llm import AgentLLMs, build_agent_llms, build_classifier_llm
 from .nodes import (
-    build_broad_synthesis_node, build_completeness_sweep_node, build_conflict_resolver_node,
-    build_constraint_filter_node, build_decomposer_node, build_direct_retriever_node,
-    build_finalize_node, build_generator_node, build_info_not_found_node,
-    build_reformulator_node, build_retrieve_subquery_node, build_verifier_node,
+    build_broad_synthesis_node, build_commit_turn_node, build_completeness_sweep_node,
+    build_conflict_resolver_node, build_constraint_filter_node, build_contextualize_node,
+    build_decomposer_node, build_direct_retriever_node, build_finalize_node,
+    build_generator_node, build_info_not_found_node, build_load_context_node,
+    build_recall_memory_node, build_reformulator_node, build_retrieve_subquery_node,
+    build_verifier_node,
 )
 from .retrieval import RetrievalGateway
 from .routing import (
-    BROAD_SYNTHESIS, COMPLETENESS_SWEEP, CONFLICT_RESOLVER, CONSTRAINT_FILTER,
-    CORE_DESTINATIONS, DECOMPOSER, DIRECT_RETRIEVER, FINALIZE, GENERATOR, INFO_NOT_FOUND,
-    REFORMULATOR, RETRIEVE_SUBQUERY, SPECIALIST_DESTINATIONS, SUPERVISOR, VERIFIER,
+    BROAD_SYNTHESIS, COMMIT_TURN, COMPLETENESS_SWEEP, CONFLICT_RESOLVER, CONSTRAINT_FILTER,
+    CONTEXTUALIZE, CORE_DESTINATIONS, DECOMPOSER, DIRECT_RETRIEVER, FINALIZE, GENERATOR,
+    INFO_NOT_FOUND, LOAD_CONTEXT, RECALL_MEMORY, REFORMULATOR, RETRIEVE_SUBQUERY,
+    SPECIALIST_DESTINATIONS, SUPERVISOR, VERIFIER,
     build_route_after_completeness_sweep, route_after_verifier,
 )
 from .runtime import make_config, make_initial_state, run_rag_graph  # noqa: F401 (re-exported)
@@ -65,12 +69,14 @@ PHASES = {
 
 class AgentGraphBuilder:
     def __init__(self, *, config: AgentConfig, llms: AgentLLMs, gateway: RetrievalGateway,
-                 generation_client, template_parser):
+                 generation_client, template_parser, checkpointer=None, memory_service=None):
         self._config = config
         self._llms = llms
         self._gateway = gateway
         self._generation_client = generation_client
         self._template_parser = template_parser
+        self._checkpointer = checkpointer
+        self._memory_service = memory_service
 
     # ------------------------------------------------------------------ build
     def build(self):
@@ -80,13 +86,21 @@ class AgentGraphBuilder:
                 f"Unsupported AGENT_GRAPH_PHASE={self._config.graph_phase}; expected one of {sorted(PHASES)}")
 
         graph = StateGraph(RAGState)
-        self._add_core(graph, spec)
+        
+        entry, exit_ = SUPERVISOR, END
+        if self._config.memory_enabled:
+            entry, exit_ = self._add_memory(graph)
+        
+        self._add_core(graph, spec, on_failure=exit_)
+
         if spec.specialists:
             self._add_specialists(graph)
         if spec.verification:
             self._add_verification(graph)
         else:
             graph.add_edge(GENERATOR, END)
+            
+        graph.add_edge(START, entry)
         return graph.compile()
 
     # ----------------------------------------------------------------- layers
@@ -149,6 +163,30 @@ class AgentGraphBuilder:
         graph.add_edge(REFORMULATOR, DIRECT_RETRIEVER)
         graph.add_edge(FINALIZE, END)
         graph.add_edge(INFO_NOT_FOUND, END)
+        
+    def _add_memory(self, graph):
+        """Returns (entry_node, exit_node)."""
+        cfg, llms = self._config, self._llms
+        if self._checkpointer is None:
+            logger.warning("[agent] memory_enabled but no checkpointer: history will NOT persist "
+                           "between calls (set AGENT_CHECKPOINTER_BACKEND)")
+ 
+        self._add(graph, LOAD_CONTEXT, build_load_context_node(llms.summarizer, cfg))
+        self._add(graph, CONTEXTUALIZE, build_contextualize_node(llms.contextualizer, cfg))
+        self._add(graph, COMMIT_TURN, build_commit_turn_node())
+ 
+        graph.add_edge(LOAD_CONTEXT, CONTEXTUALIZE)
+        if cfg.ltm_enabled and self._memory_service is not None:
+            self._add(graph, RECALL_MEMORY, build_recall_memory_node(self._memory_service, cfg))
+            graph.add_edge(CONTEXTUALIZE, RECALL_MEMORY)
+            graph.add_edge(RECALL_MEMORY, SUPERVISOR)
+        else:
+            if cfg.ltm_enabled:
+                logger.warning("[agent] ltm_enabled but no memory_service: long-term recall disabled")
+            graph.add_edge(CONTEXTUALIZE, SUPERVISOR)
+ 
+        graph.add_edge(COMMIT_TURN, END)
+        return LOAD_CONTEXT, COMMIT_TURN
 
 
 def build_rag_graph(settings, nlp_controller, generation_client, template_parser, get_project):

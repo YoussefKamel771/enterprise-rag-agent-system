@@ -12,6 +12,9 @@ from sqlalchemy.orm import sessionmaker
 from models import ProjectModel
 from controllers import NLPController
 
+from stores.agents.memory.backends import build_memory_resources
+from stores.agents.memory.service import MemoryService
+
 # 1. Define the lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,6 +60,13 @@ async def lifespan(app: FastAPI):
         default_language=settings.DEFAULT_LANG,
     )
     
+    # Memory resources (checkpointer for short-term, store for long-term)
+    app.state.memory = await build_memory_resources(settings, embedding_client=app.state.embedding_client)
+    app.state.memory_service = (
+        MemoryService(app.state.memory.store, ttl_days=settings.AGENT_LTM_TTL_DAYS)
+        if app.state.memory.store else None
+    )
+    
     # Agent graph (LangGraph) -- built once, same as every client above.
     # `build_rag_graph` is the single factory entry point (stores/agents);
     # which compiled graph comes back is a config switch
@@ -80,6 +90,8 @@ async def lifespan(app: FastAPI):
         generation_client=app.state.generation_client,
         template_parser=app.state.template_parser,
         get_project=get_project,
+        checkpointer=app.state.memory.checkpointer,
+        memory_service=app.state.memory_service,
     )
 
 
@@ -88,6 +100,7 @@ async def lifespan(app: FastAPI):
     # --- Shutdown Logic ---
     await app.state.db_engine.dispose()
     await app.state.vectordb_client.disconnect()
+    await app.state.memory.close()
 
 
 # 2. Pass the lifespan to the FastAPI constructor

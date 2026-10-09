@@ -29,6 +29,11 @@ REFORMULATOR = "reformulator"
 INFO_NOT_FOUND = "info_not_found"
 FINALIZE = "finalize"
 
+LOAD_CONTEXT = "load_context"
+CONTEXTUALIZE = "contextualize"
+RECALL_MEMORY = "recall_memory"
+COMMIT_TURN = "commit_turn"
+
 # Destinations the supervisor may route to, grouped by the phase that adds them.
 CORE_DESTINATIONS = frozenset({DIRECT_RETRIEVER})
 SPECIALIST_DESTINATIONS = frozenset({

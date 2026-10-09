@@ -127,3 +127,39 @@ REFORMULATION_PROMPT = ChatPromptTemplate.from_messages([
                "information more precisely."),
     ("human", "{question}"),
 ])
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+CONTEXTUALIZE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "You rewrite the user's latest message into ONE standalone question for searching a "
+     "company's internal documents (Slack, Gmail, Jira, Confluence, ...). Resolve pronouns and "
+     "ellipsis ('it', 'that customer', 'and the 2025 version?') using the conversation. "
+     "Keep every codename, ticket id, name, date and acronym verbatim. Add nothing that is not "
+     "in the conversation. If the message is already standalone, return it unchanged. "
+     "Do NOT answer the question. Output only the rewritten question."),
+    ("human",
+     "Conversation summary:\n{summary}\n\nRecent conversation:\n{history}\n\n"
+     "Latest message:\n{question}\n\nStandalone question:"),
+])
+
+SUMMARIZE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "You maintain a running summary of a conversation between a user and a company-knowledge "
+     "assistant. Merge the existing summary with the new transcript into one concise summary "
+     "(under 200 words). Keep: what the user is investigating, entities / codenames / ticket ids "
+     "mentioned, and constraints the user stated. Drop pleasantries. Output only the summary."),
+    ("human", "Existing summary:\n{summary}\n\nNew transcript to merge:\n{transcript}\n\nUpdated summary:"),
+])
+
+EXTRACT_PROFILE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "From the user's message ONLY, extract durable facts ABOUT THE USER that would help personalise "
+     "future answers: their role, team, projects they own, preferred sources or answer format. "
+     "Do NOT extract facts about the company or the topic they are asking about. Do NOT extract "
+     "anything sensitive (credentials, contact details, personal, health or financial data); if a "
+     "fact is sensitive set sensitive=true. Most messages contain no such fact: return an empty list."),
+    ("human", "{message}"),
+])

@@ -1,16 +1,25 @@
 """
 stores/agents/nodes/generation.py
-
+ 
 Answer generation. Context selection is a pure function
 (`select_context_chunks`) so it can be unit-tested without an LLM.
+ 
+Memory additions:
+  * recalled long-term memories go in a clearly-labelled "background, not
+    evidence" block. They never enter `citations`, and the verifier only ever
+    sees chunks, so a memory can't "ground" a claim.
+  * optional chat history (AGENT_GENERATOR_SEES_HISTORY, default off): the
+    standalone question already carries the context.
 """
-
+ 
 import logging
 from typing import List
-
+ 
+from langchain_core.messages import AIMessage, HumanMessage
+ 
 from ..config import AgentConfig
 from ..state import RAGState
-
+ 
 logger = logging.getLogger("uvicorn")
 
 
@@ -28,6 +37,22 @@ def select_context_chunks(chunks: List, *, min_score: float, max_chunks: int) ->
     ranked = sorted(best.values(), key=lambda pair: pair[0], reverse=True)
     return [d for score, d in ranked if score >= min_score][:max_chunks]
 
+def _history_as_chat(generation_llm, messages, max_turns: int) -> list:
+    msgs = list(messages or [])
+    if msgs and isinstance(msgs[-1], HumanMessage):
+        msgs = msgs[:-1]
+    msgs = msgs[-max(2, max_turns * 2):]
+    out = []
+    for m in msgs:
+        if isinstance(m, HumanMessage):
+            role = "user"
+        elif isinstance(m, AIMessage):
+            role = "assistant"
+        else:
+            continue
+        out.append(generation_llm.construct_prompt(
+            m.content if isinstance(m.content, str) else str(m.content), role=role))
+    return out
 
 def build_generator_node(generation_llm, template_parser, config: AgentConfig):
     async def generator_node(state: RAGState) -> dict:
@@ -45,15 +70,27 @@ def build_generator_node(generation_llm, template_parser, config: AgentConfig):
             for i, doc in enumerate(chunks)
         )
         footer_prompt = template_parser.get("rag", "footer_prompt", {"query": state["question"]})
-        full_prompt = "\n\n".join([documents_prompt, footer_prompt])
-
-        logger.info("[agent] generator: %d chunks, prompt=%d chars, docs=%s",
-                    len(chunks), len(full_prompt), sorted({d.doc_id for d in chunks}))
+        
+        parts = [documents_prompt, footer_prompt]
+        memories = state.get("recalled_memories") or []
+        if memories:
+            memory_prompt = template_parser.get("rag", "memory_prompt", {
+                "memories": "\n".join(f"- {m['text']}" for m in memories)})
+            parts.insert(0, memory_prompt)  # before the documents: background, not evidence
+        full_prompt = "\n\n".join(parts)
+        
+        chat_history = [generation_llm.construct_prompt(system_prompt, role="system")]
+        if config.generator_sees_history:
+            chat_history += _history_as_chat(
+                generation_llm, state.get("messages"), config.history_max_turns)
+            
+        logger.info("[agent] generator: %d chunks, %d memories, prompt=%d chars, docs=%s",
+                    len(chunks), len(memories), len(full_prompt), sorted({d.doc_id for d in chunks}))
 
         try:
             answer = await generation_llm.generate_text(
                 prompt=full_prompt,
-                chat_history=[generation_llm.construct_prompt(system_prompt, role="system")],
+                chat_history=chat_history,
             )
         except Exception as exc:
             logger.exception("[agent] generator failed")

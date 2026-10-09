@@ -53,3 +53,12 @@ class ClaimVerdict(BaseModel):
 
 class GroundingVerdict(BaseModel):
     claims: list[ClaimVerdict] = Field(default_factory=list)
+
+class ProfileFact(BaseModel):
+    text: str = Field(description="Short third-person fact, e.g. 'Works on the inference-runtime team'.")
+    confidence: float = Field(ge=0.0, le=1.0)
+    sensitive: bool = False
+
+
+class ProfileFacts(BaseModel):
+    facts: list[ProfileFact] = Field(default_factory=list)

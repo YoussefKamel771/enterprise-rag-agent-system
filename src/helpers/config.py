@@ -86,6 +86,19 @@ class Settings(BaseSettings):
     AGENT_COMPLETENESS_MAX_ATTEMPTS: int = 4
     AGENT_RECURSION_LIMIT: int = 25
     
+    # ========================= Agent memory =========================
+    AGENT_MEMORY_ENABLED: bool = False
+    AGENT_CHECKPOINTER_BACKEND: str = "none"      # none | memory | postgres
+    AGENT_HISTORY_MAX_TURNS: int = 6
+    AGENT_SUMMARY_TRIGGER_TOKENS: int = 1500
+    AGENT_GENERATOR_SEES_HISTORY: bool = False
+    AGENT_LTM_ENABLED: bool = False               # requires AGENT_MEMORY_ENABLED
+    AGENT_LTM_TOP_K: int = 4
+    AGENT_LTM_MIN_SCORE: float = 0.35
+    AGENT_LTM_MIN_CONFIDENCE: float = 0.7
+    AGENT_LTM_TTL_DAYS: int = 180
+    AGENT_MEMORY_MODEL_ID: str = None             # falls back to AGENT_CLASSIFIER_MODEL_ID
+    
     # ========================= Evaluation Harness Config =========================
     AGENT_JUDGE_BACKEND_LITERAL: List[str] = ["OPENAI"]
     AGENT_JUDGE_BACKEND: str = "OPENAI"
