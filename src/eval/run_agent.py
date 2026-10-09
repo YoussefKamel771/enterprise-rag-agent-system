@@ -129,11 +129,6 @@ async def run_question(deps: dict, inputs: dict, project_id: int, phase: int, ru
     state = make_initial_state(inputs["question"], project_id, settings.AGENT_MAX_ITERATIONS)
 
     steps: list[dict] = []
-    async for chunk in graph.astream(state, config=config, stream_mode="updates"):
-        for node, update in chunk.items():
-            steps.append(_summarize_step(node, update))
-
-    steps: list[dict] = []
     final: dict = {}
     async for mode, payload in graph.astream(
         state, config=config, stream_mode=["updates", "values"]
