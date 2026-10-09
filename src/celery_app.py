@@ -49,6 +49,7 @@ celery_app = Celery(
         "tasks.data_indexing",
         "tasks.data_processing",
         "tasks.process_workflow",
+        "tasks.memory",   
     ]
 )
 
@@ -80,6 +81,7 @@ celery_app.conf.update(
         "tasks.data_processing.process_assets": {"queue": "data_processing"},
         "tasks.data_indexing.index_project_task": {"queue": "data_indexing"},
         "tasks.process_workflow.check_chunking_result": {"queue": "data_processing"},
+        "tasks.memory.write_memory_task": {"queue": "memory"},
     }
 )
 
